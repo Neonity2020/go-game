@@ -18,7 +18,7 @@ function getNeighbors(pos: Position, size: number): Position[] {
   return neighbors;
 }
 
-function getGroup(board: (Stone | null)[][], pos: Position, size: number): Position[] {
+export function getGroup(board: (Stone | null)[][], pos: Position, size: number): Position[] {
   const stone = board[pos.row][pos.col];
   if (!stone) return [];
 
@@ -44,7 +44,7 @@ function getGroup(board: (Stone | null)[][], pos: Position, size: number): Posit
   return group;
 }
 
-function getLiberties(board: (Stone | null)[][], group: Position[], size: number): number {
+export function getLiberties(board: (Stone | null)[][], group: Position[], size: number): number {
   const libertySet = new Set<string>();
   for (const pos of group) {
     for (const neighbor of getNeighbors(pos, size)) {
