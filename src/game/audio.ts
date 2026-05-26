@@ -1,14 +1,11 @@
-// Web Audio API synthesizer for Go stone placement click sounds and flowing water BGM.
+// Advanced Web Audio API synthesizer for Go stone placement clicks and flowing water BGM.
 
 let audioCtx: AudioContext | null = null;
-let streamSource: AudioBufferSourceNode | null = null;
-let streamGain: GainNode | null = null;
-let streamFilter: BiquadFilterNode | null = null;
-let streamFilter2: BiquadFilterNode | null = null;
-let lfo1: OscillatorNode | null = null;
-let lfo1Gain: GainNode | null = null;
-let lfo2: OscillatorNode | null = null;
-let lfo2Gain: GainNode | null = null;
+let streamSources: AudioBufferSourceNode[] = [];
+let streamGains: GainNode[] = [];
+let streamFilters: BiquadFilterNode[] = [];
+let lfos: OscillatorNode[] = [];
+let lfoGains: GainNode[] = [];
 let bubbleTimerId: any = null;
 let isBgmPlaying = false;
 
@@ -23,63 +20,90 @@ function getAudioContext(): AudioContext {
 }
 
 /**
- * Synthesizes a realistic Go stone placement sound (clack and wood resonance)
+ * Synthesizes an extremely crisp and realistic Go stone placement sound.
+ * Combines high-frequency contact clicks, slate/shell transient friction noise, 
+ * and Kaya wood board cabinet resonances.
  */
 export function playStoneSound() {
   try {
     const ctx = getAudioContext();
     const now = ctx.currentTime;
 
-    // 1. Attack snap (very short high-frequency triangle/noise click)
+    // 1. High-frequency sharp attack click (the slate/glass contact snap)
     const attackOsc = ctx.createOscillator();
     const attackGain = ctx.createGain();
-    attackOsc.type = 'triangle';
-    attackOsc.frequency.setValueAtTime(1600, now);
-    attackOsc.frequency.exponentialRampToValueAtTime(150, now + 0.04);
+    attackOsc.type = 'sine';
+    // Very fast pitch sweep from 5000Hz down to 900Hz in 10ms for maximum crispness
+    attackOsc.frequency.setValueAtTime(5000, now);
+    attackOsc.frequency.exponentialRampToValueAtTime(900, now + 0.01);
     
-    attackGain.gain.setValueAtTime(0.28, now);
-    attackGain.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
+    attackGain.gain.setValueAtTime(0.45, now);
+    attackGain.gain.exponentialRampToValueAtTime(0.001, now + 0.01);
     
     attackOsc.connect(attackGain);
     attackGain.connect(ctx.destination);
     attackOsc.start(now);
-    attackOsc.stop(now + 0.045);
+    attackOsc.stop(now + 0.012);
 
-    // 2. Kaya Go board wood resonance (lower mid thud)
+    // 2. Ultra-short highpass noise burst (slate/shell friction click)
+    const bufferSize = ctx.sampleRate * 0.008; // 8ms of noise
+    const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
+    const channelData = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < bufferSize; i++) {
+      channelData[i] = Math.random() * 2 - 1;
+    }
+    const noiseSource = ctx.createBufferSource();
+    noiseSource.buffer = noiseBuffer;
+    
+    const noiseFilter = ctx.createBiquadFilter();
+    noiseFilter.type = 'highpass';
+    noiseFilter.frequency.setValueAtTime(3500, now); // Keep only crisp high frequencies
+    
+    const noiseGain = ctx.createGain();
+    noiseGain.gain.setValueAtTime(0.25, now);
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.006);
+    
+    noiseSource.connect(noiseFilter);
+    noiseFilter.connect(noiseGain);
+    noiseGain.connect(ctx.destination);
+    noiseSource.start(now);
+    noiseSource.stop(now + 0.008);
+
+    // 3. Resonant wood board body (the Kaya wood thump)
     const boardOsc = ctx.createOscillator();
     const boardGain = ctx.createGain();
-    boardOsc.type = 'sine';
-    boardOsc.frequency.setValueAtTime(290, now);
-    boardOsc.frequency.exponentialRampToValueAtTime(170, now + 0.08);
+    boardOsc.type = 'triangle';
+    boardOsc.frequency.setValueAtTime(420, now); // slightly higher frequency for definition
+    boardOsc.frequency.exponentialRampToValueAtTime(210, now + 0.05);
 
-    boardGain.gain.setValueAtTime(0.55, now);
-    boardGain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+    boardGain.gain.setValueAtTime(0.32, now);
+    boardGain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
 
     boardOsc.connect(boardGain);
     boardGain.connect(ctx.destination);
     boardOsc.start(now);
-    boardOsc.stop(now + 0.11);
+    boardOsc.stop(now + 0.06);
 
-    // 3. Deeper cabinet hollow resonance (low frequency base)
-    const cabinetOsc = ctx.createOscillator();
-    const cabinetGain = ctx.createGain();
-    cabinetOsc.type = 'sine';
-    cabinetOsc.frequency.setValueAtTime(85, now);
-    
-    cabinetGain.gain.setValueAtTime(0.12, now);
-    cabinetGain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+    // 4. Low-frequency cabinet cavity resonance (depth/thud)
+    const cavityOsc = ctx.createOscillator();
+    const cavityGain = ctx.createGain();
+    cavityOsc.type = 'sine';
+    cavityOsc.frequency.setValueAtTime(95, now);
+    cavityGain.gain.setValueAtTime(0.12, now);
+    cavityGain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
 
-    cabinetOsc.connect(cabinetGain);
-    cabinetGain.connect(ctx.destination);
-    cabinetOsc.start(now);
-    cabinetOsc.stop(now + 0.19);
+    cavityOsc.connect(cavityGain);
+    cavityGain.connect(ctx.destination);
+    cavityOsc.start(now);
+    cavityOsc.stop(now + 0.11);
   } catch (e) {
     console.warn('Failed to play stone sound:', e);
   }
 }
 
 /**
- * Triggers a tiny high-pitched droplet bubble sound for the flowing water BGM
+ * Triggers a highly realistic liquid droplet/bubble sound.
+ * Real droplets plop from lower to higher frequencies with high filter resonance.
  */
 function playWaterBubble() {
   if (!audioCtx || !isBgmPlaying) return;
@@ -89,29 +113,41 @@ function playWaterBubble() {
     const gain = audioCtx.createGain();
     
     osc.type = 'sine';
-    // Random high frequency representing tiny bubbles rising
-    const startFreq = 950 + Math.random() * 1100;
-    const endFreq = startFreq + 150 + Math.random() * 250;
+    
+    // Distinguish low "bloop" drops from high "tink" droplets for realism
+    const isLowDrop = Math.random() > 0.4;
+    const startFreq = isLowDrop 
+      ? 350 + Math.random() * 200 
+      : 1200 + Math.random() * 600;
+    // Rapid upward frequency rise characteristic of liquid bubbles popping
+    const endFreq = startFreq * (1.3 + Math.random() * 0.25);
     
     osc.frequency.setValueAtTime(startFreq, now);
-    osc.frequency.exponentialRampToValueAtTime(endFreq, now + 0.07);
+    osc.frequency.exponentialRampToValueAtTime(endFreq, now + 0.055);
 
-    // Dynamic low volume to sound distant and organic
-    gain.gain.setValueAtTime(0.003 + Math.random() * 0.008, now);
-    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.07);
+    gain.gain.setValueAtTime(isLowDrop ? 0.009 : 0.005, now);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.06);
 
-    osc.connect(gain);
+    // Resonant bandpass filter creates the "liquid" ringing hollow quality
+    const dropFilter = audioCtx.createBiquadFilter();
+    dropFilter.type = 'bandpass';
+    dropFilter.frequency.setValueAtTime(endFreq, now);
+    dropFilter.Q.setValueAtTime(6.0, now); // High Q for resonant "bloop"
+
+    osc.connect(dropFilter);
+    dropFilter.connect(gain);
     gain.connect(audioCtx.destination);
 
     osc.start(now);
-    osc.stop(now + 0.08);
+    osc.stop(now + 0.07);
   } catch (e) {
-    // Ignore minor Web Audio scheduling issues
+    // Ignore minor scheduling errors
   }
 }
 
 /**
- * Starts generating a procedural ambient soundscape of flowing water
+ * Starts generating a highly realistic multi-band procedural flowing water stream soundscape.
+ * Combines 3 independent frequency noise bands and liquid droplets.
  */
 export function startBgm() {
   if (isBgmPlaying) return;
@@ -120,7 +156,7 @@ export function startBgm() {
     isBgmPlaying = true;
     const now = ctx.currentTime;
 
-    // 1. Create a 2-second white noise buffer
+    // Create a 2-second white noise buffer used across all bands
     const bufferSize = ctx.sampleRate * 2;
     const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
     const channelData = noiseBuffer.getChannelData(0);
@@ -128,66 +164,63 @@ export function startBgm() {
       channelData[i] = Math.random() * 2 - 1;
     }
 
-    streamSource = ctx.createBufferSource();
-    streamSource.buffer = noiseBuffer;
-    streamSource.loop = true;
+    // Configure 3 independent audio bands for rich water layers
+    const bandsConfig = [
+      { centerFreq: 320, type: 'lowpass' as const, Q: 1.0, gain: 0.038, lfoRate: 0.04, lfoDepth: 80, name: 'deep current' },
+      { centerFreq: 750, type: 'bandpass' as const, Q: 2.0, gain: 0.015, lfoRate: 0.12, lfoDepth: 160, name: 'mid splashes' },
+      { centerFreq: 2200, type: 'bandpass' as const, Q: 3.0, gain: 0.008, lfoRate: 0.28, lfoDepth: 400, name: 'high babble' }
+    ];
 
-    // 2. Configure filters to shape noise into rushing water
-    streamFilter = ctx.createBiquadFilter();
-    streamFilter.type = 'bandpass';
-    streamFilter.Q.value = 1.0;
-    streamFilter.frequency.setValueAtTime(450, now);
+    bandsConfig.forEach((band) => {
+      const source = ctx.createBufferSource();
+      source.buffer = noiseBuffer;
+      source.loop = true;
 
-    streamFilter2 = ctx.createBiquadFilter();
-    streamFilter2.type = 'lowpass';
-    streamFilter2.frequency.setValueAtTime(700, now);
+      const filter = ctx.createBiquadFilter();
+      filter.type = band.type;
+      filter.frequency.setValueAtTime(band.centerFreq, now);
+      filter.Q.setValueAtTime(band.Q, now);
 
-    streamGain = ctx.createGain();
-    streamGain.gain.setValueAtTime(0.06, now); // Quiet background volume
+      const gainNode = ctx.createGain();
+      gainNode.gain.setValueAtTime(band.gain, now);
 
-    // Connect nodes
-    streamSource.connect(streamFilter);
-    streamFilter.connect(streamFilter2);
-    streamFilter2.connect(streamGain);
-    streamGain.connect(ctx.destination);
+      source.connect(filter);
+      filter.connect(gainNode);
+      gainNode.connect(ctx.destination);
+      source.start(now);
 
-    streamSource.start(now);
+      // Modulate frequency of this band to create water wave current dynamics
+      const lfo = ctx.createOscillator();
+      lfo.frequency.setValueAtTime(band.lfoRate, now);
+      const lfoGain = ctx.createGain();
+      lfoGain.gain.setValueAtTime(band.lfoDepth, now);
 
-    // 3. Modulate filter frequency with slow LFO (water current variation)
-    lfo1 = ctx.createOscillator();
-    lfo1.frequency.setValueAtTime(0.12, now);
-    lfo1Gain = ctx.createGain();
-    lfo1Gain.gain.setValueAtTime(120, now);
-    
-    lfo1.connect(lfo1Gain);
-    lfo1Gain.connect(streamFilter.frequency);
-    lfo1.start(now);
+      lfo.connect(lfoGain);
+      lfoGain.connect(filter.frequency);
+      lfo.start(now);
 
-    // 4. Modulate gain/volume slightly with a second slow LFO (water waves)
-    lfo2 = ctx.createOscillator();
-    lfo2.frequency.setValueAtTime(0.08, now);
-    lfo2Gain = ctx.createGain();
-    lfo2Gain.gain.setValueAtTime(0.018, now);
+      streamSources.push(source);
+      streamFilters.push(filter);
+      streamGains.push(gainNode);
+      lfos.push(lfo);
+      lfoGains.push(lfoGain);
+    });
 
-    lfo2.connect(lfo2Gain);
-    lfo2Gain.connect(streamGain.gain);
-    lfo2.start(now);
-
-    // 5. Schedule periodic high-frequency bubble sounds
+    // Schedule droplet triggers at irregular natural intervals
     bubbleTimerId = setInterval(() => {
-      if (isBgmPlaying && Math.random() > 0.3) {
+      if (isBgmPlaying && Math.random() > 0.2) {
         playWaterBubble();
       }
-    }, 150);
+    }, 110);
 
   } catch (e) {
-    console.error('Failed to start water BGM:', e);
+    console.error('Failed to start realistic water BGM:', e);
     isBgmPlaying = false;
   }
 }
 
 /**
- * Stops the flowing water BGM and cleans up Web Audio nodes
+ * Stops BGM and cleans up Web Audio nodes
  */
 export function stopBgm() {
   if (!isBgmPlaying) return;
@@ -198,8 +231,7 @@ export function stopBgm() {
     bubbleTimerId = null;
   }
 
-  const nodes = [streamSource, lfo1, lfo2];
-  nodes.forEach(node => {
+  streamSources.forEach(node => {
     if (node) {
       try {
         node.stop();
@@ -207,12 +239,17 @@ export function stopBgm() {
     }
   });
 
-  streamSource = null;
-  streamGain = null;
-  streamFilter = null;
-  streamFilter2 = null;
-  lfo1 = null;
-  lfo1Gain = null;
-  lfo2 = null;
-  lfo2Gain = null;
+  lfos.forEach(node => {
+    if (node) {
+      try {
+        node.stop();
+      } catch (e) {}
+    }
+  });
+
+  streamSources = [];
+  streamFilters = [];
+  streamGains = [];
+  lfos = [];
+  lfoGains = [];
 }
