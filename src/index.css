@@ -573,3 +573,184 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 }
+
+/* AI Analysis Card Styles */
+.ai-analysis-card {
+  border-left: 4px solid #22c55e !important;
+  background: rgba(240, 253, 244, 0.4) !important;
+}
+
+.analysis-toggle-btn {
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: #e4e1d9;
+  color: #49453e;
+  font-size: 12px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.25s ease;
+  border: 1px solid rgba(55, 50, 43, 0.12);
+}
+
+.analysis-toggle-btn.active {
+  background: #22c55e;
+  color: #ffffff;
+  border-color: #16a34a;
+  box-shadow: 0 4px 12px rgba(34, 197, 94, 0.25);
+}
+
+.analysis-box {
+  margin-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.analysis-spinner-box {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 20px 0;
+  color: #6d6960;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.analysis-spinner-box .spinner {
+  border-color: rgba(34, 197, 94, 0.2);
+  border-top-color: #22c55e;
+}
+
+.analysis-status-msg {
+  padding: 16px;
+  text-align: center;
+  color: #8c352f;
+  background: rgba(154, 65, 60, 0.08);
+  border-radius: 6px;
+  font-size: 13px;
+}
+
+.winrate-history-chart {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.85);
+  border-radius: 8px;
+  padding: 10px;
+  border: 1px solid rgba(55, 50, 43, 0.08);
+}
+
+.chart-heading,
+.candidates-heading {
+  font-size: 12px;
+  font-weight: bold;
+  color: #6d6960;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.chart-svg-container {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ai-candidates {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.candidates-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.candidate-list-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.85);
+  border: 1px solid rgba(55, 50, 43, 0.08);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.candidate-list-item:hover {
+  background: #ffffff;
+  border-color: #22c55e;
+  transform: translateX(4px);
+  box-shadow: 0 4px 12px rgba(34, 197, 94, 0.08);
+}
+
+.rank-num {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: bold;
+  color: #ffffff;
+}
+
+.rank-1 .rank-num {
+  background: #22c55e;
+}
+
+.rank-2 .rank-num {
+  background: #0ea5e9;
+}
+
+.rank-3 .rank-num {
+  background: #3b82f6;
+}
+
+.rank-4 .rank-num {
+  background: #64748b;
+}
+
+.coord-text {
+  font-family: Menlo, Monaco, Consolas, "Courier New", monospace;
+  font-weight: bold;
+  font-size: 14px;
+  color: #1e1d1a;
+  min-width: 40px;
+}
+
+.candidate-stats {
+  display: flex;
+  margin-left: auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.rate-text {
+  font-size: 13px;
+  font-weight: bold;
+  color: #22c55e;
+}
+
+.lead-text {
+  font-size: 13px;
+  font-weight: bold;
+  color: #49453e;
+  min-width: 50px;
+  text-align: right;
+}
+
+.analysis-card-footer {
+  font-size: 11px;
+  color: #8a8377;
+  text-align: center;
+  margin-top: 6px;
+  font-style: italic;
+}

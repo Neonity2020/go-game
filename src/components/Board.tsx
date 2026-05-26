@@ -1,11 +1,14 @@
 import { useRef, useEffect, useCallback, useState } from 'react';
-import type { GameState, Position } from '../game/types';
+import type { GameState, Position, AnalysisResult, AnalysisMove } from '../game/types';
 import { isValidMove } from '../game/engine';
 
 interface BoardProps {
   state: GameState;
   onMove: (pos: Position) => void;
   disabled?: boolean;
+  analysis?: AnalysisResult | null;
+  showAnalysis?: boolean;
+  hoveredAnalysisMove?: AnalysisMove | null;
 }
 
 const STAR_POINTS: Record<number, [number, number][]> = {
@@ -40,6 +43,23 @@ function positionFromPointer(
     Math.abs(x - snapX) > hitRadius ||
     Math.abs(y - snapY) > hitRadius
   ) {
+    return null;
+  }
+
+  return { row, col };
+}
+
+function fromGtpCoord(coord: string, boardSize: number): Position | null {
+  const normalized = coord.trim().toUpperCase();
+  if (normalized === 'PASS') return null;
+  if (normalized === 'RESIGN') return null;
+
+  const letter = normalized[0];
+  const col = BOARD_LETTERS.indexOf(letter);
+  const rowNumber = Number(normalized.slice(1));
+  const row = boardSize - rowNumber;
+
+  if (col < 0 || col >= boardSize || isNaN(row) || row < 0 || row >= boardSize) {
     return null;
   }
 
@@ -94,7 +114,14 @@ function drawStone(
   ctx.restore();
 }
 
-export default function Board({ state, onMove, disabled = false }: BoardProps) {
+export default function Board({
+  state,
+  onMove,
+  disabled = false,
+  analysis = null,
+  showAnalysis = false,
+  hoveredAnalysisMove = null,
+}: BoardProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [hovered, setHovered] = useState<Position | null>(null);
   const { board, boardSize, lastMove, currentPlayer } = state;
@@ -206,6 +233,109 @@ export default function Board({ state, onMove, disabled = false }: BoardProps) {
       ctx.stroke();
     }
 
+    // Draw AI analysis recommendations
+    if (showAnalysis && analysis && analysis.moves) {
+      const recs = analysis.moves.slice(0, 5);
+      recs.forEach((rec, index) => {
+        if (!rec.position) return;
+        const { row, col } = rec.position;
+        if (board[row][col] !== null) return;
+
+        const x = padding + col * cellSize;
+        const y = padding + row * cellSize;
+        const radius = cellSize * 0.44;
+
+        ctx.save();
+        
+        let baseColor = 'rgba(74, 222, 128, 0.72)';
+        let strokeColor = 'rgba(34, 197, 94, 0.9)';
+        if (index === 1) {
+          baseColor = 'rgba(56, 189, 248, 0.72)';
+          strokeColor = 'rgba(14, 165, 233, 0.9)';
+        } else if (index > 1) {
+          baseColor = 'rgba(147, 197, 253, 0.65)';
+          strokeColor = 'rgba(59, 130, 246, 0.8)';
+        }
+
+        ctx.beginPath();
+        ctx.arc(x, y, radius * 0.85, 0, Math.PI * 2);
+        ctx.fillStyle = baseColor;
+        ctx.fill();
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = Math.max(1.5, cellSize * 0.05);
+        ctx.stroke();
+
+        ctx.beginPath();
+        ctx.arc(x, y, radius * 0.15, 0, Math.PI * 2);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+
+        ctx.fillStyle = '#1e1d1a';
+        ctx.font = `bold ${Math.max(9, cellSize * 0.3)}px Inter, ui-sans-serif, system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        
+        const text = `${Math.round(rec.winrate)}%`;
+        ctx.fillText(text, x, y - radius * 1.05);
+
+        ctx.restore();
+      });
+    }
+
+    // Draw hovered AI predicted path (PV)
+    if (showAnalysis && hoveredAnalysisMove && hoveredAnalysisMove.pv && hoveredAnalysisMove.pv.length > 0) {
+      ctx.save();
+      
+      let prevX = -1;
+      let prevY = -1;
+
+      hoveredAnalysisMove.pv.slice(0, 6).forEach((gtpMove, idx) => {
+        const pos = fromGtpCoord(gtpMove, boardSize);
+        if (!pos) return;
+
+        const x = padding + pos.col * cellSize;
+        const y = padding + pos.row * cellSize;
+        const radius = cellSize * 0.35;
+
+        if (prevX !== -1 && prevY !== -1) {
+          ctx.beginPath();
+          ctx.moveTo(prevX, prevY);
+          ctx.lineTo(x, y);
+          ctx.strokeStyle = 'rgba(234, 179, 8, 0.85)';
+          ctx.lineWidth = Math.max(2, cellSize * 0.06);
+          ctx.setLineDash([4, 3]);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        const stepColor = (idx % 2 === 0) ? currentPlayer : (currentPlayer === 'black' ? 'white' : 'black');
+        
+        if (stepColor === 'black') {
+          ctx.fillStyle = 'rgba(5, 5, 6, 0.72)';
+          ctx.strokeStyle = 'rgba(255, 255, 255, 0.8)';
+        } else {
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.75)';
+          ctx.strokeStyle = 'rgba(5, 5, 6, 0.8)';
+        }
+        ctx.fill();
+        ctx.lineWidth = 1;
+        ctx.stroke();
+
+        ctx.fillStyle = stepColor === 'black' ? '#ffffff' : '#000000';
+        ctx.font = `bold ${Math.max(10, cellSize * 0.32)}px Inter, ui-sans-serif, system-ui, sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(idx + 1), x, y);
+
+        prevX = x;
+        prevY = y;
+      });
+
+      ctx.restore();
+    }
+
     if (
       hovered &&
       !disabled &&
@@ -222,7 +352,7 @@ export default function Board({ state, onMove, disabled = false }: BoardProps) {
         0.46,
       );
     }
-  }, [board, boardSize, currentPlayer, disabled, hovered, lastMove, state]);
+  }, [board, boardSize, currentPlayer, disabled, hovered, lastMove, state, showAnalysis, analysis, hoveredAnalysisMove]);
 
   useEffect(() => {
     draw();

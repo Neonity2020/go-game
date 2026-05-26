@@ -6,6 +6,22 @@ export interface MoveRecord {
   player: Stone;
   position: Position | null; // null = pass
   captures: number; // stones captured this move
+  winrate?: number; // winrate for this move (0-100)
+  scoreLead?: number; // estimated score lead (positive = black leads, negative = white leads)
+}
+
+export interface AnalysisMove {
+  position: Position | null;
+  gtpMove: string;
+  visits: number;
+  winrate: number;
+  scoreLead: number;
+  pv: string[];
+}
+
+export interface AnalysisResult {
+  currentPlayer: Stone;
+  moves: AnalysisMove[];
 }
 
 export interface ScoreResult {

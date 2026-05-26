@@ -1,4 +1,4 @@
-import type { GameState, Position } from './types';
+import type { GameState, Position, AnalysisResult } from './types';
 
 export type KataGoMoveResult = Position | 'resign' | null;
 
@@ -38,6 +38,35 @@ export async function getKataGoMove(state: GameState, komi: number): Promise<Kat
     if (data.result === null || typeof data.result === 'undefined') return null;
     if (isPosition(data.result)) return data.result;
     throw new Error('KataGo bridge returned an invalid move');
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+export async function getKataGoAnalysis(state: GameState, komi: number, durationMs = 800): Promise<AnalysisResult> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 10_000);
+
+  try {
+    const response = await fetch(`${bridgeUrl()}/analyze`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state, komi, durationMs }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      throw new Error(`KataGo bridge returned ${response.status}`);
+    }
+
+    const data = await response.json() as { ok: boolean; analysis?: AnalysisResult; error?: string };
+    if (data.error) {
+      throw new Error(data.error);
+    }
+    if (data.ok && data.analysis) {
+      return data.analysis;
+    }
+    throw new Error('KataGo bridge returned invalid analysis data');
   } finally {
     window.clearTimeout(timeout);
   }

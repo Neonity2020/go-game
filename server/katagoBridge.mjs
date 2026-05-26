@@ -164,6 +164,142 @@ async function getMove(state, komi) {
   return fromGtpCoord(rawMove.split(/\s+/)[0], boardSize);
 }
 
+function parseAnalysis(rawStdout, boardSize) {
+  const lines = rawStdout.split('\n');
+  let targetLine = '';
+  for (let i = lines.length - 1; i >= 0; i--) {
+    if (lines[i].includes('info move')) {
+      targetLine = lines[i];
+      break;
+    }
+  }
+
+  if (!targetLine) {
+    return [];
+  }
+
+  const movesRaw = targetLine.split(/\binfo\s+/).filter(Boolean);
+  const moves = [];
+
+  for (const raw of movesRaw) {
+    if (!raw.trim().startsWith('move')) continue;
+
+    const tokens = raw.trim().split(/\s+/);
+    let moveCoord = null;
+    let visits = 0;
+    let winrate = 0;
+    let scoreLead = 0;
+    const pv = [];
+
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i];
+      if (token === 'move' && i + 1 < tokens.length) {
+        moveCoord = tokens[i + 1];
+        i++;
+      } else if (token === 'visits' && i + 1 < tokens.length) {
+        visits = parseInt(tokens[i + 1], 10);
+        i++;
+      } else if (token === 'winrate' && i + 1 < tokens.length) {
+        winrate = parseFloat(tokens[i + 1]);
+        i++;
+      } else if (token === 'scoreLead' && i + 1 < tokens.length) {
+        scoreLead = parseFloat(tokens[i + 1]);
+        i++;
+      } else if (token === 'pv') {
+        for (let j = i + 1; j < tokens.length; j++) {
+          pv.push(tokens[j]);
+        }
+        break;
+      }
+    }
+
+    if (moveCoord) {
+      let position = null;
+      try {
+        position = fromGtpCoord(moveCoord, boardSize);
+      } catch (e) {
+        // Keep position as null
+      }
+
+      let normalizedWinrate = winrate;
+      if (normalizedWinrate <= 1.0 && normalizedWinrate > 0) {
+        normalizedWinrate = normalizedWinrate * 100;
+      } else if (normalizedWinrate > 100) {
+        normalizedWinrate = normalizedWinrate / 100;
+      }
+
+      moves.push({
+        position,
+        gtpMove: moveCoord,
+        visits,
+        winrate: Number(normalizedWinrate.toFixed(2)),
+        scoreLead: Number(scoreLead.toFixed(2)),
+        pv,
+      });
+    }
+  }
+
+  moves.sort((a, b) => b.visits - a.visits);
+  return moves;
+}
+
+async function getAnalysis(state, komi, durationMs = 800) {
+  const boardSize = state?.boardSize;
+  const currentPlayer = state?.currentPlayer;
+  const moves = state?.moveRecords;
+  if (![9, 13, 19].includes(boardSize)) throw new Error('Unsupported board size');
+  if (currentPlayer !== 'black' && currentPlayer !== 'white') throw new Error('Invalid current player');
+  if (!Array.isArray(moves)) throw new Error('Invalid move records');
+
+  await sendGtp(`boardsize ${boardSize}`);
+  await sendGtp('clear_board');
+  await sendGtp(`komi ${Number.isFinite(komi) ? komi : 6.5}`);
+
+  for (const move of moves) {
+    await sendGtp(`play ${toGtpColor(move.player)} ${toGtpCoord(move.position, boardSize)}`);
+  }
+
+  let rawStdout = '';
+  const onData = (chunk) => {
+    rawStdout += chunk;
+  };
+
+  katagoProcess.stdout.on('data', onData);
+
+  const analysisPromise = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error('Analysis timed out'));
+    }, durationMs + 2000);
+
+    pendingResponses.push({
+      finish(raw) {
+        clearTimeout(timer);
+        resolve(rawStdout);
+      },
+      reject(err) {
+        clearTimeout(timer);
+        reject(err);
+      },
+    });
+  });
+
+  katagoProcess.stdin.write(`kata-analyze ${toGtpColor(currentPlayer)} 10\n`);
+
+  await new Promise(resolve => setTimeout(resolve, durationMs));
+
+  katagoProcess.stdin.write('\n');
+
+  const resultRaw = await analysisPromise;
+
+  katagoProcess.stdout.off('data', onData);
+
+  const analyzedMoves = parseAnalysis(resultRaw, boardSize);
+  return {
+    currentPlayer,
+    moves: analyzedMoves,
+  };
+}
+
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, {
     'Content-Type': 'application/json',
@@ -214,6 +350,14 @@ const server = http.createServer(async (request, response) => {
       const payload = JSON.parse(body);
       const result = await getMove(payload.state, Number(payload.komi));
       sendJson(response, 200, { engine: 'katago', result });
+      return;
+    }
+
+    if (request.method === 'POST' && request.url === '/analyze') {
+      const body = await readBody(request);
+      const payload = JSON.parse(body);
+      const result = await getAnalysis(payload.state, Number(payload.komi), Number(payload.durationMs || 800));
+      sendJson(response, 200, { ok: true, analysis: result });
       return;
     }
 
