@@ -29,7 +29,10 @@ export default function App() {
 
   return (
     <div style={styles.container}>
-      <h1 style={styles.title}>围棋</h1>
+      <div style={styles.header}>
+        <img src="/logo.png" alt="围棋" style={styles.logo} />
+        <h1 style={styles.title}>围棋</h1>
+      </div>
 
       <div style={styles.main}>
         <Board state={gameState} onMove={handleMove} />
@@ -112,8 +115,19 @@ const styles: Record<string, React.CSSProperties> = {
     fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
     color: '#e0e0e0',
   },
+  header: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 16,
+    marginBottom: 20,
+  },
+  logo: {
+    width: 48,
+    height: 48,
+    borderRadius: 8,
+  },
   title: {
-    margin: '0 0 20px 0',
+    margin: 0,
     fontSize: '28px',
     fontWeight: 600,
     color: '#f0d060',
