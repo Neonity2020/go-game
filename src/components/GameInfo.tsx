@@ -1,6 +1,6 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import Board from './Board';
-import type { GameState, MoveRecord, Position, ScoreResult, Stone, AnalysisResult, AnalysisMove } from '../game/types';
+import type { GameState, MoveRecord, Position, ScoreResult, Stone, AnalysisResult, AnalysisMove, SavedGame } from '../game/types';
 import { calculateScore, createInitialState, isValidMove, pass, placeStone, resign, undo } from '../game/engine';
 import { getKataGoMove, getKataGoAnalysis } from '../game/katagoClient';
 
@@ -17,6 +17,21 @@ type NigiriState =
 const BOARD_SIZES = [9, 13, 19] as const;
 const DEFAULT_KOMI = 6.5;
 const BOARD_LETTERS = 'ABCDEFGHJKLMNOPQRST';
+
+const STORAGE_KEY = 'go_game_history';
+
+function reconstructGameState(savedGame: SavedGame, stepNum: number): GameState {
+  let state = createInitialState(savedGame.boardSize);
+  for (let i = 0; i < stepNum; i++) {
+    const record = savedGame.moveRecords[i];
+    if (record.position) {
+      state = placeStone(state, record.position);
+    } else {
+      state = pass(state);
+    }
+  }
+  return state;
+}
 
 function createNigiri(): NigiriState {
   return {
@@ -77,11 +92,104 @@ export default function GameApp() {
   const [hoveredAnalysisMove, setHoveredAnalysisMove] = useState<AnalysisMove | null>(null);
   const [winRateHistory, setWinRateHistory] = useState<{ moveNumber: number; blackWinrate: number }[]>([]);
 
-  const { currentPlayer, captures, gameOver, passCount, boardSize, moveRecords } = gameState;
+  // Review mode states
+  const [isReviewMode, setIsReviewMode] = useState(false);
+  const [reviewGame, setReviewGame] = useState<SavedGame | null>(null);
+  const [reviewStep, setReviewStep] = useState(0);
+  const [trialState, setTrialState] = useState<GameState | null>(null);
+  const [savedGames, setSavedGames] = useState<SavedGame[]>([]);
+  const [hasSavedCurrentGame, setHasSavedCurrentGame] = useState(false);
 
+  const { currentPlayer, gameOver, passCount, boardSize, moveRecords } = gameState;
+
+  const nigiriPending = gameMode === 'pve' && nigiri.status === 'pending';
+  const isAiTurn = gameMode === 'pve' && !nigiriPending && currentPlayer !== humanColor && !gameOver;
+
+  // Reconstruct state at specific review step
+  const reviewGameState = useMemo(() => {
+    if (!reviewGame) return null;
+    return reconstructGameState(reviewGame, reviewStep);
+  }, [reviewGame, reviewStep]);
+
+  // Derived state to display on the board & sidebar
+  const currentViewedState = useMemo(() => {
+    if (trialState) return trialState;
+    if (isReviewMode && reviewGameState) return reviewGameState;
+    return gameState;
+  }, [isReviewMode, reviewGameState, trialState, gameState]);
+
+  // Load history from localStorage
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) {
+        setSavedGames(JSON.parse(stored));
+      }
+    } catch (e) {
+      console.error('Failed to load saved games:', e);
+    }
+  }, []);
+
+  // Save game helper
+  const saveGameToHistory = useCallback((gameToSave: SavedGame) => {
+    setSavedGames(prev => {
+      const next = [gameToSave, ...prev];
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      } catch (e) {
+        console.error('Failed to save game to localStorage:', e);
+      }
+      return next;
+    });
+  }, []);
+
+  // Delete game helper
+  const deleteGameFromHistory = useCallback((id: string, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setSavedGames(prev => {
+      const next = prev.filter(g => g.id !== id);
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(next));
+      } catch (e) {
+        console.error('Failed to delete game from localStorage:', e);
+      }
+      return next;
+    });
+  }, []);
+
+  // Auto-save current game on game over
+  useEffect(() => {
+    if (gameOver && !isReviewMode && !hasSavedCurrentGame && moveRecords.length > 0) {
+      const scoreResult = calculateScore(gameState, komi);
+      const gameToSave: SavedGame = {
+        id: `game_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+        date: new Date().toLocaleString('zh-CN', {
+          month: '2-digit',
+          day: '2-digit',
+          hour: '2-digit',
+          minute: '2-digit',
+        }),
+        boardSize: gameState.boardSize,
+        gameMode,
+        komi,
+        winner: scoreResult.winner,
+        scoreResult,
+        moveRecords,
+        winRateHistory,
+      };
+      saveGameToHistory(gameToSave);
+      setHasSavedCurrentGame(true);
+    }
+  }, [gameOver, isReviewMode, hasSavedCurrentGame, gameState, gameMode, komi, moveRecords, winRateHistory, saveGameToHistory]);
+
+  // Analysis effect
   useEffect(() => {
     let active = true;
-    if (!showAnalysis || gameOver) {
+    const shouldSkip = isReviewMode 
+      ? !showAnalysis 
+      : (!showAnalysis || gameOver || isAiTurn);
+
+    if (shouldSkip) {
       Promise.resolve().then(() => {
         if (active) setAnalysisResult(null);
       });
@@ -95,21 +203,23 @@ export default function GameApp() {
       }
     });
 
-    getKataGoAnalysis(gameState, komi, 800)
+    getKataGoAnalysis(currentViewedState, komi, 800)
       .then(result => {
         if (!active) return;
         setAnalysisResult(result);
         setAnalysisLoading(false);
 
-        const moveNumber = gameState.moveRecords.length;
-        if (result.moves && result.moves.length > 0) {
-          const bestMove = result.moves[0];
-          const bestWinrate = bestMove.winrate;
-          const blackWinrate = result.currentPlayer === 'black' ? bestWinrate : (100 - bestWinrate);
-          setWinRateHistory(prev => {
-            const filtered = prev.filter(p => p.moveNumber < moveNumber);
-            return [...filtered, { moveNumber, blackWinrate }];
-          });
+        if (!isReviewMode) {
+          const moveNumber = currentViewedState.moveRecords.length;
+          if (result.moves && result.moves.length > 0) {
+            const bestMove = result.moves[0];
+            const bestWinrate = bestMove.winrate;
+            const blackWinrate = result.currentPlayer === 'black' ? bestWinrate : (100 - bestWinrate);
+            setWinRateHistory(prev => {
+              const filtered = prev.filter(p => p.moveNumber < moveNumber);
+              return [...filtered, { moveNumber, blackWinrate }];
+            });
+          }
         }
       })
       .catch(err => {
@@ -123,25 +233,33 @@ export default function GameApp() {
     return () => {
       active = false;
     };
-  }, [gameState, komi, showAnalysis, gameOver]);
+  }, [currentViewedState, komi, showAnalysis, gameOver, isAiTurn, isReviewMode]);
+
   const workerRef = useRef<Worker | null>(null);
   const aiPendingRef = useRef(false);
   const aiRequestIdRef = useRef(0);
 
-  const moveCount = moveRecords.length;
-  const nigiriPending = gameMode === 'pve' && nigiri.status === 'pending';
-  const isAiTurn = gameMode === 'pve' && !nigiriPending && currentPlayer !== humanColor && !gameOver;
+  // Derived UI variables based on currentViewedState
+  const moveCount = currentViewedState.moveRecords.length;
   const boardDisabled = gameOver || aiThinking || isAiTurn || nigiriPending;
 
-  const score = useMemo(() => calculateScore(gameState, komi), [gameState, komi]);
+  const score = useMemo(() => calculateScore(currentViewedState, komi), [currentViewedState, komi]);
   const boardFill = useMemo(() => {
-    const occupied = gameState.board.reduce(
+    const occupied = currentViewedState.board.reduce(
       (sum, row) => sum + row.filter(Boolean).length,
       0,
     );
     return Math.round((occupied / (boardSize * boardSize)) * 100);
-  }, [boardSize, gameState.board]);
-  const recentMoves = moveRecords.slice(-10).reverse();
+  }, [boardSize, currentViewedState.board]);
+  const recentMoves = currentViewedState.moveRecords.slice(-10).reverse();
+
+  // Winrate history selection
+  const effectiveWinRateHistory = useMemo(() => {
+    if (isReviewMode && reviewGame) {
+      return reviewGame.winRateHistory || [];
+    }
+    return winRateHistory;
+  }, [isReviewMode, reviewGame, winRateHistory]);
 
   const applyAIResult = useCallback((aiResult: AIResult) => {
     if (aiResult === 'resign') {
@@ -156,6 +274,18 @@ export default function GameApp() {
   }, []);
 
   const handleMove = useCallback((pos: Position) => {
+    if (isReviewMode) {
+      const baseState = trialState || reviewGameState;
+      if (!baseState) return;
+      if (!isValidMove(baseState, pos)) {
+        setNotice('该位置不可落子');
+        return;
+      }
+      setNotice('');
+      setTrialState(placeStone(baseState, pos));
+      return;
+    }
+
     if (gameMode === 'pve' && currentPlayer !== humanColor) return;
     if (!isValidMove(gameState, pos)) {
       setNotice('该位置不可落子');
@@ -163,7 +293,7 @@ export default function GameApp() {
     }
     setNotice('');
     setGameState(prev => placeStone(prev, pos));
-  }, [currentPlayer, gameMode, gameState, humanColor]);
+  }, [isReviewMode, trialState, reviewGameState, gameMode, currentPlayer, humanColor, gameState]);
 
   const handlePass = () => {
     if (gameMode === 'pve' && currentPlayer !== humanColor) return;
@@ -216,6 +346,59 @@ export default function GameApp() {
     setWinRateHistory([]);
     setAnalysisResult(null);
     setGameState(createInitialState(size));
+    setIsReviewMode(false);
+    setReviewGame(null);
+    setReviewStep(0);
+    setTrialState(null);
+    setHasSavedCurrentGame(false);
+  };
+
+  const handleStartReview = (game: SavedGame) => {
+    setReviewGame(game);
+    setReviewStep(game.moveRecords.length);
+    setIsReviewMode(true);
+    setTrialState(null);
+    setGameState(createInitialState(game.boardSize));
+  };
+
+  const handleExitReview = () => {
+    setIsReviewMode(false);
+    setReviewGame(null);
+    setReviewStep(0);
+    setTrialState(null);
+  };
+
+  const goToStart = () => {
+    setReviewStep(0);
+    setTrialState(null);
+    setNotice('');
+  };
+
+  const prevStep = () => {
+    setReviewStep(prev => Math.max(0, prev - 1));
+    setTrialState(null);
+    setNotice('');
+  };
+
+  const nextStep = () => {
+    if (!reviewGame) return;
+    setReviewStep(prev => Math.min(reviewGame.moveRecords.length, prev + 1));
+    setTrialState(null);
+    setNotice('');
+  };
+
+  const goToEnd = () => {
+    if (!reviewGame) return;
+    setReviewStep(reviewGame.moveRecords.length);
+    setTrialState(null);
+    setNotice('');
+  };
+
+  const handleSliderChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const val = parseInt(e.target.value, 10);
+    setReviewStep(val);
+    setTrialState(null);
+    setNotice('');
   };
 
   useEffect(() => {
@@ -255,6 +438,10 @@ export default function GameApp() {
   }, [aiEngine, applyAIResult, gameState, isAiTurn, komi]);
 
   const statusText = () => {
+    if (isReviewMode) {
+      if (trialState) return '研究变化中';
+      return `复盘中：第 ${reviewStep} / ${reviewGame?.moveRecords.length || 0} 手`;
+    }
     if (nigiriPending) return '猜先决定执黑';
     if (gameOver) {
       if (passCount >= 2) return `终局，${formatWinner(score, gameMode, humanColor)} ${scoreLead(score)} 目`;
@@ -264,17 +451,19 @@ export default function GameApp() {
     return `${playerLabel(currentPlayer, gameMode, humanColor)}落子`;
   };
 
-  const statusTone = gameOver || nigiriPending ? 'status-ended' : currentPlayer === 'black' ? 'status-black' : 'status-white';
+  const statusTone = isReviewMode
+    ? (trialState ? 'status-trial' : 'status-review')
+    : (gameOver || nigiriPending ? 'status-ended' : currentPlayer === 'black' ? 'status-black' : 'status-white');
   const playerColorText = gameMode === 'pve' && !nigiriPending ? `你执${colorLabel(humanColor)}` : null;
 
   const renderWinRateChart = () => {
-    if (winRateHistory.length < 2) return null;
+    if (effectiveWinRateHistory.length < 2) return null;
     
     const width = 300;
     const height = 65;
     const padding = { top: 5, right: 5, bottom: 5, left: 25 };
     
-    const maxX = Math.max(...winRateHistory.map(p => p.moveNumber));
+    const maxX = Math.max(...effectiveWinRateHistory.map(p => p.moveNumber));
     const minX = 0;
     
     const getX = (xVal: number) => {
@@ -289,7 +478,7 @@ export default function GameApp() {
     let linePath = '';
     let areaPath = '';
     
-    winRateHistory.forEach((pt, idx) => {
+    effectiveWinRateHistory.forEach((pt, idx) => {
       const cx = getX(pt.moveNumber);
       const cy = getY(pt.blackWinrate);
       
@@ -301,7 +490,7 @@ export default function GameApp() {
         areaPath += ` L ${cx} ${cy}`;
       }
       
-      if (idx === winRateHistory.length - 1) {
+      if (idx === effectiveWinRateHistory.length - 1) {
         areaPath += ` L ${cx} ${getY(50)} Z`;
       }
     });
@@ -327,10 +516,22 @@ export default function GameApp() {
         <path d={areaPath} fill="url(#winrateAreaGrad)" />
         <path d={linePath} fill="none" stroke="#22c55e" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" />
 
-        {winRateHistory.length > 0 && (
+        {isReviewMode && reviewStep > 0 && reviewStep <= maxX && (
+          <line
+            x1={getX(reviewStep)}
+            y1={padding.top}
+            x2={getX(reviewStep)}
+            y2={height - padding.bottom}
+            stroke="#ea580c"
+            strokeWidth={1.5}
+            strokeDasharray="2,2"
+          />
+        )}
+
+        {effectiveWinRateHistory.length > 0 && (
           <circle
-            cx={getX(winRateHistory[winRateHistory.length - 1].moveNumber)}
-            cy={getY(winRateHistory[winRateHistory.length - 1].blackWinrate)}
+            cx={getX(effectiveWinRateHistory[effectiveWinRateHistory.length - 1].moveNumber)}
+            cy={getY(effectiveWinRateHistory[effectiveWinRateHistory.length - 1].blackWinrate)}
             r={3.5}
             fill="#22c55e"
             stroke="#ffffff"
@@ -362,9 +563,9 @@ export default function GameApp() {
       <main className="game-layout">
         <section className="board-section" aria-label="棋盘">
           <Board
-            state={gameState}
+            state={currentViewedState}
             onMove={handleMove}
-            disabled={boardDisabled}
+            disabled={isReviewMode ? false : boardDisabled}
             analysis={analysisResult}
             showAnalysis={showAnalysis}
             hoveredAnalysisMove={hoveredAnalysisMove}
@@ -374,14 +575,92 @@ export default function GameApp() {
         <aside className="side-panel">
           <section className="status-block">
             <div className={`turn-chip ${statusTone}`}>
-              {!gameOver && !aiThinking && !nigiriPending && <span className={`stone-dot ${currentPlayer}`} />}
+              {!gameOver && !aiThinking && !nigiriPending && <span className={`stone-dot ${currentViewedState.currentPlayer}`} />}
               {aiThinking && <span className="spinner" />}
               <span>{statusText()}</span>
             </div>
             {notice && <div className="notice">{notice}</div>}
           </section>
 
-          {gameMode === 'pve' && (
+          {/* Review HUD Navigation Panel */}
+          {isReviewMode && (
+            <section className="panel-section review-hud-card">
+              <div className="section-heading">
+                <h2>复盘进度</h2>
+                <span>{reviewStep} / {reviewGame?.moveRecords.length || 0}</span>
+              </div>
+              <div className="review-slider-box">
+                <input
+                  type="range"
+                  min={0}
+                  max={reviewGame?.moveRecords.length || 0}
+                  value={reviewStep}
+                  onChange={handleSliderChange}
+                  disabled={!!trialState}
+                  className="review-slider"
+                />
+              </div>
+              <div className="review-btn-row">
+                <button type="button" onClick={goToStart} disabled={reviewStep === 0 || !!trialState} title="第一手">
+                  ⏮️
+                </button>
+                <button type="button" onClick={prevStep} disabled={reviewStep === 0 || !!trialState} title="上一手">
+                  ◀️
+                </button>
+                <button type="button" onClick={nextStep} disabled={reviewStep === (reviewGame?.moveRecords.length || 0) || !!trialState} title="下一手">
+                  ▶️
+                </button>
+                <button type="button" onClick={goToEnd} disabled={reviewStep === (reviewGame?.moveRecords.length || 0) || !!trialState} title="最后一手">
+                  ⏭️
+                </button>
+              </div>
+              {trialState && (
+                <div className="trial-badge">
+                  💡 处于局部探索状态。点击棋盘放置临时棋子以探索变化，分析结果已切换至该变化。
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* Game Over Actions Quick Review */}
+          {gameOver && !isReviewMode && (
+            <section className="panel-section game-over-card">
+              <div className="game-over-title">🎉 对局已结束</div>
+              <p className="game-over-desc">
+                您可以选择立即进入复盘，查看全局胜率曲线和 KataGo 智能推荐点。
+              </p>
+              <div className="game-over-actions">
+                <button
+                  type="button"
+                  className="primary-button"
+                  onClick={() => {
+                    const scoreResult = calculateScore(gameState, komi);
+                    const gameToReview: SavedGame = {
+                      id: `game_temp`,
+                      date: new Date().toLocaleString('zh-CN', {
+                        month: '2-digit',
+                        day: '2-digit',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                      }),
+                      boardSize: gameState.boardSize,
+                      gameMode,
+                      komi,
+                      winner: scoreResult.winner,
+                      scoreResult,
+                      moveRecords,
+                      winRateHistory,
+                    };
+                    handleStartReview(gameToReview);
+                  }}
+                >
+                  🔍 进入智能复盘
+                </button>
+              </div>
+            </section>
+          )}
+
+          {gameMode === 'pve' && !isReviewMode && (
             <section className="panel-section nigiri-card">
               <div className="section-heading">
                 <h2>猜先</h2>
@@ -415,27 +694,53 @@ export default function GameApp() {
           <section className="panel-section captures-grid" aria-label="提子数">
             <div>
               <span className="section-label">{playerLabel('black', gameMode, humanColor)}</span>
-              <strong>{captures.black}</strong>
+              <strong>{currentViewedState.captures.black}</strong>
               <small>黑方提子</small>
             </div>
             <div>
               <span className="section-label">{playerLabel('white', gameMode, humanColor)}</span>
-              <strong>{captures.white}</strong>
+              <strong>{currentViewedState.captures.white}</strong>
               <small>白方提子</small>
             </div>
           </section>
 
-          <section className="panel-section action-row" aria-label="对局操作">
-            <button type="button" onClick={handleUndo} disabled={aiThinking || moveRecords.length === 0}>
-              悔棋
-            </button>
-            <button type="button" onClick={handlePass} disabled={boardDisabled}>
-              弃权
-            </button>
-            <button type="button" className="danger-button" onClick={handleResign} disabled={gameOver || nigiriPending}>
-              认输
-            </button>
-          </section>
+          {isReviewMode ? (
+            trialState ? (
+              <section className="panel-section action-row" aria-label="研究操作">
+                <button type="button" onClick={() => setTrialState(prev => {
+                  if (!prev) return null;
+                  const next = undo(prev);
+                  if (next.moveRecords.length === reviewGameState?.moveRecords.length) {
+                    return null;
+                  }
+                  return next;
+                })}>
+                  撤销探索
+                </button>
+                <button type="button" className="primary-button" onClick={() => setTrialState(null)}>
+                  返回对局线
+                </button>
+              </section>
+            ) : (
+              <section className="panel-section action-row" aria-label="复盘操作">
+                <button type="button" className="danger-button" onClick={handleExitReview}>
+                  退出复盘
+                </button>
+              </section>
+            )
+          ) : (
+            <section className="panel-section action-row" aria-label="对局操作">
+              <button type="button" onClick={handleUndo} disabled={aiThinking || moveRecords.length === 0}>
+                悔棋
+              </button>
+              <button type="button" onClick={handlePass} disabled={boardDisabled}>
+                弃权
+              </button>
+              <button type="button" className="danger-button" onClick={handleResign} disabled={gameOver || nigiriPending}>
+                认输
+              </button>
+            </section>
+          )}
 
           <section className="panel-section ai-analysis-card">
             <div className="section-heading">
@@ -614,6 +919,45 @@ export default function GameApp() {
                 </li>
               ))}
             </ol>
+          </section>
+
+          <section className="panel-section history-panel-card">
+            <div className="section-heading">
+              <h2>对局历史</h2>
+              <span className="history-count">共 {savedGames.length} 局</span>
+            </div>
+            {savedGames.length === 0 ? (
+              <div className="history-empty">暂无历史对局数据</div>
+            ) : (
+              <div className="history-list">
+                {savedGames.map(game => (
+                  <div
+                    key={game.id}
+                    className="history-item"
+                    onClick={() => handleStartReview(game)}
+                    title="点击进行复盘"
+                  >
+                    <div className="history-item-header">
+                      <span className="game-date">{game.date}</span>
+                      <span className="game-badge">{game.boardSize}路 · {game.gameMode === 'pve' ? '人机' : '双人'}</span>
+                    </div>
+                    <div className="history-item-body">
+                      <span className="game-result">
+                        {game.winner === 'tie' ? '平局' : `${game.winner === 'black' ? '黑' : '白'}胜 (${Math.abs(game.scoreResult.blackTotal - game.scoreResult.whiteTotal).toFixed(1)}目)`}
+                      </span>
+                      <button
+                        type="button"
+                        className="delete-history-btn"
+                        onClick={(e) => deleteGameFromHistory(game.id, e)}
+                        title="删除此记录"
+                      >
+                        🗑️
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </section>
         </aside>
       </main>

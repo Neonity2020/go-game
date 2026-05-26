@@ -754,3 +754,248 @@ button:disabled {
   margin-top: 6px;
   font-style: italic;
 }
+
+/* Review Mode & Game History Styles */
+.turn-chip.status-review {
+  background: rgba(14, 165, 233, 0.15) !important;
+  color: #0369a1 !important;
+  border: 1px solid rgba(14, 165, 233, 0.3) !important;
+}
+
+.turn-chip.status-trial {
+  background: rgba(249, 115, 22, 0.15) !important;
+  color: #c2410c !important;
+  border: 1px solid rgba(249, 115, 22, 0.3) !important;
+  animation: pulse-trial 2s infinite ease-in-out;
+}
+
+@keyframes pulse-trial {
+  0% { box-shadow: 0 0 0 0 rgba(249, 115, 22, 0.4); }
+  70% { box-shadow: 0 0 0 6px rgba(249, 115, 22, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(249, 115, 22, 0); }
+}
+
+.review-hud-card {
+  border-left: 4px solid #0ea5e9 !important;
+  background: rgba(240, 249, 255, 0.4) !important;
+}
+
+.review-slider-box {
+  margin: 8px 0;
+  display: flex;
+  align-items: center;
+}
+
+.review-slider {
+  width: 100%;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(55, 50, 43, 0.12);
+  outline: none;
+  -webkit-appearance: none;
+  cursor: pointer;
+}
+
+.review-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #0ea5e9;
+  border: 2px solid #ffffff;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.15);
+  transition: transform 0.15s ease;
+}
+
+.review-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.2);
+}
+
+.review-btn-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.review-btn-row button {
+  padding: 6px 0;
+  font-size: 14px;
+  border-radius: 6px;
+  background: #ffffff;
+  border: 1px solid rgba(55, 50, 43, 0.12);
+  color: #49453e;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.review-btn-row button:hover:not(:disabled) {
+  background: #f0f9ff;
+  border-color: #0ea5e9;
+  color: #0ea5e9;
+}
+
+.review-btn-row button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.trial-badge {
+  margin-top: 12px;
+  font-size: 11px;
+  color: #c2410c;
+  background: rgba(249, 115, 22, 0.08);
+  padding: 6px 10px;
+  border-radius: 6px;
+  border: 1px dashed rgba(249, 115, 22, 0.2);
+  line-height: 1.4;
+}
+
+/* Game Over Card */
+.game-over-card {
+  border-left: 4px solid #ea580c !important;
+  background: rgba(254, 243, 199, 0.35) !important;
+}
+
+.game-over-title {
+  font-weight: bold;
+  color: #ea580c;
+  font-size: 14px;
+  margin-bottom: 6px;
+}
+
+.game-over-desc {
+  font-size: 12px;
+  color: #6d6960;
+  margin-bottom: 12px;
+  line-height: 1.4;
+}
+
+.game-over-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.game-over-actions button {
+  width: 100%;
+}
+
+/* Game History Panel */
+.history-panel-card {
+  max-height: 380px;
+  display: flex;
+  flex-direction: column;
+}
+
+.history-count {
+  font-size: 11px;
+  color: #8a8377;
+  font-weight: normal;
+  background: rgba(55, 50, 43, 0.06);
+  padding: 2px 6px;
+  border-radius: 999px;
+}
+
+.history-empty {
+  font-size: 12px;
+  color: #8a8377;
+  text-align: center;
+  padding: 24px 0;
+  font-style: italic;
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+  max-height: 280px;
+  padding-right: 4px;
+}
+
+.history-list::-webkit-scrollbar {
+  width: 4px;
+}
+
+.history-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.history-list::-webkit-scrollbar-thumb {
+  background: rgba(55, 50, 43, 0.15);
+  border-radius: 999px;
+}
+
+.history-item {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(55, 50, 43, 0.08);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.history-item:hover {
+  background: #ffffff;
+  border-color: #0ea5e9;
+  box-shadow: 0 4px 12px rgba(14, 165, 233, 0.06);
+  transform: translateY(-1px);
+}
+
+.history-item-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.game-date {
+  font-size: 11px;
+  color: #8a8377;
+  font-weight: 500;
+}
+
+.game-badge {
+  font-size: 10px;
+  color: #49453e;
+  background: rgba(55, 50, 43, 0.06);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-weight: bold;
+}
+
+.history-item-body {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.game-result {
+  font-size: 12px;
+  font-weight: bold;
+  color: #1e1d1a;
+}
+
+.delete-history-btn {
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  font-size: 12px;
+  border-radius: 4px;
+  color: #8a8377;
+  transition: all 0.15s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.delete-history-btn:hover {
+  background: rgba(239, 68, 68, 0.1);
+  color: #ef4444;
+}

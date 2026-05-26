@@ -32,6 +32,24 @@ let katagoProcess = null;
 let stdoutBuffer = '';
 const pendingResponses = [];
 
+// Request queue to serialize KataGo process access and prevent race conditions
+let requestQueue = Promise.resolve();
+
+function enqueue(task) {
+  return new Promise((resolve, reject) => {
+    requestQueue = requestQueue
+      .then(async () => {
+        try {
+          const result = await task();
+          resolve(result);
+        } catch (err) {
+          reject(err);
+        }
+      })
+      .catch(() => {}); // prevent queue from breaking on errors
+  });
+}
+
 function ensureLogDir() {
   mkdirSync(logDir, { recursive: true });
 }
@@ -264,40 +282,41 @@ async function getAnalysis(state, komi, durationMs = 800) {
     rawStdout += chunk;
   };
 
-  katagoProcess.stdout.on('data', onData);
+  katagoProcess?.stdout?.on('data', onData);
 
-  const analysisPromise = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error('Analysis timed out'));
-    }, durationMs + 2000);
+  try {
+    const analysisPromise = new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(new Error('Analysis timed out'));
+      }, durationMs + 2000);
 
-    pendingResponses.push({
-      finish(raw) {
-        clearTimeout(timer);
-        resolve(rawStdout);
-      },
-      reject(err) {
-        clearTimeout(timer);
-        reject(err);
-      },
+      pendingResponses.push({
+        finish(raw) {
+          clearTimeout(timer);
+          resolve(rawStdout);
+        },
+        reject(err) {
+          clearTimeout(timer);
+          reject(err);
+        },
+      });
     });
-  });
 
-  katagoProcess.stdin.write(`kata-analyze ${toGtpColor(currentPlayer)} 10\n`);
+    katagoProcess.stdin.write(`kata-analyze ${toGtpColor(currentPlayer)} 10\n`);
 
-  await new Promise(resolve => setTimeout(resolve, durationMs));
+    await new Promise(resolve => setTimeout(resolve, durationMs));
 
-  katagoProcess.stdin.write('\n');
+    katagoProcess.stdin.write('\n');
 
-  const resultRaw = await analysisPromise;
-
-  katagoProcess.stdout.off('data', onData);
-
-  const analyzedMoves = parseAnalysis(resultRaw, boardSize);
-  return {
-    currentPlayer,
-    moves: analyzedMoves,
-  };
+    const resultRaw = await analysisPromise;
+    const analyzedMoves = parseAnalysis(resultRaw, boardSize);
+    return {
+      currentPlayer,
+      moves: analyzedMoves,
+    };
+  } finally {
+    katagoProcess?.stdout?.off('data', onData);
+  }
 }
 
 function sendJson(response, statusCode, payload) {
@@ -348,7 +367,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'POST' && request.url === '/move') {
       const body = await readBody(request);
       const payload = JSON.parse(body);
-      const result = await getMove(payload.state, Number(payload.komi));
+      const result = await enqueue(() => getMove(payload.state, Number(payload.komi)));
       sendJson(response, 200, { engine: 'katago', result });
       return;
     }
@@ -356,7 +375,7 @@ const server = http.createServer(async (request, response) => {
     if (request.method === 'POST' && request.url === '/analyze') {
       const body = await readBody(request);
       const payload = JSON.parse(body);
-      const result = await getAnalysis(payload.state, Number(payload.komi), Number(payload.durationMs || 800));
+      const result = await enqueue(() => getAnalysis(payload.state, Number(payload.komi), Number(payload.durationMs || 800)));
       sendJson(response, 200, { ok: true, analysis: result });
       return;
     }

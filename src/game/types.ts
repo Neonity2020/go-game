@@ -37,6 +37,18 @@ export interface ScoreResult {
   winner: Stone | 'tie';
 }
 
+export interface SavedGame {
+  id: string;
+  date: string;
+  boardSize: number;
+  gameMode: 'pvp' | 'pve';
+  komi: number;
+  winner: Stone | 'tie';
+  scoreResult: ScoreResult;
+  moveRecords: MoveRecord[];
+  winRateHistory?: { moveNumber: number; blackWinrate: number }[];
+}
+
 export interface GameState {
   boardSize: number;
   board: (Stone | null)[][];
