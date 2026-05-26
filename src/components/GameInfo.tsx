@@ -3,6 +3,7 @@ import Board from './Board';
 import type { GameState, MoveRecord, Position, ScoreResult, Stone, AnalysisResult, AnalysisMove, SavedGame } from '../game/types';
 import { calculateScore, createInitialState, isValidMove, pass, placeStone, resign, undo } from '../game/engine';
 import { getKataGoMove, getKataGoAnalysis } from '../game/katagoClient';
+import { playStoneSound, startBgm, stopBgm } from '../game/audio';
 
 type GameMode = 'pvp' | 'pve';
 type AIEngine = 'katago' | 'browser';
@@ -99,6 +100,27 @@ export default function GameApp() {
   const [trialState, setTrialState] = useState<GameState | null>(null);
   const [savedGames, setSavedGames] = useState<SavedGame[]>([]);
   const [hasSavedCurrentGame, setHasSavedCurrentGame] = useState(false);
+
+  // Audio BGM states & handlers
+  const [bgmPlaying, setBgmPlaying] = useState(false);
+
+  const toggleBgm = useCallback(() => {
+    setBgmPlaying(prev => {
+      const next = !prev;
+      if (next) {
+        startBgm();
+      } else {
+        stopBgm();
+      }
+      return next;
+    });
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      stopBgm();
+    };
+  }, []);
 
   const { currentPlayer, gameOver, passCount, boardSize, moveRecords } = gameState;
 
@@ -252,6 +274,15 @@ export default function GameApp() {
     return Math.round((occupied / (boardSize * boardSize)) * 100);
   }, [boardSize, currentViewedState.board]);
   const recentMoves = currentViewedState.moveRecords.slice(-10).reverse();
+
+  // Play stone sound when a move is made or navigated forward
+  const lastMoveCountRef = useRef(moveCount);
+  useEffect(() => {
+    if (moveCount > lastMoveCountRef.current) {
+      playStoneSound();
+    }
+    lastMoveCountRef.current = moveCount;
+  }, [moveCount]);
 
   // Winrate history selection
   const effectiveWinRateHistory = useMemo(() => {
@@ -557,6 +588,16 @@ export default function GameApp() {
           <span>第 {moveCount} 手</span>
           <span>占用 {boardFill}%</span>
           <span>贴目 {komi.toFixed(1)}</span>
+        </div>
+
+        <div className="header-actions">
+          <button
+            type="button"
+            className={`bgm-toggle-btn ${bgmPlaying ? 'active' : ''}`}
+            onClick={toggleBgm}
+          >
+            {bgmPlaying ? '🔊 溪流音效' : '🔇 溪流音效'}
+          </button>
         </div>
       </header>
 

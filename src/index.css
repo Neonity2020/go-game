@@ -999,3 +999,43 @@ button:disabled {
   background: rgba(239, 68, 68, 0.1);
   color: #ef4444;
 }
+
+/* BGM Toggle Button Styling */
+.bgm-toggle-btn {
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: transparent;
+  color: #49453e;
+  border: 1px solid rgba(55, 50, 43, 0.18);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+}
+
+.bgm-toggle-btn:hover {
+  background: rgba(55, 50, 43, 0.04);
+  border-color: rgba(55, 50, 43, 0.3);
+}
+
+.bgm-toggle-btn.active {
+  background: #f0f9ff;
+  color: #0284c7;
+  border-color: #bae6fd;
+  box-shadow: 0 4px 12px rgba(14, 165, 233, 0.12);
+  animation: pulse-bgm 2.5s infinite ease-in-out;
+}
+
+@keyframes pulse-bgm {
+  0%, 100% {
+    border-color: #bae6fd;
+  }
+  50% {
+    border-color: #38bdf8;
+    box-shadow: 0 4px 16px rgba(14, 165, 233, 0.2);
+  }
+}
