@@ -29,23 +29,49 @@ export function playStoneSound() {
     const ctx = getAudioContext();
     const now = ctx.currentTime;
 
-    // 1. High-frequency sharp attack click (the slate/glass contact snap)
-    const attackOsc = ctx.createOscillator();
-    const attackGain = ctx.createGain();
-    attackOsc.type = 'sine';
-    // Very fast pitch sweep from 5000Hz down to 900Hz in 10ms for maximum crispness
-    attackOsc.frequency.setValueAtTime(5000, now);
-    attackOsc.frequency.exponentialRampToValueAtTime(900, now + 0.01);
-    
-    attackGain.gain.setValueAtTime(0.45, now);
-    attackGain.gain.exponentialRampToValueAtTime(0.001, now + 0.01);
-    
-    attackOsc.connect(attackGain);
-    attackGain.connect(ctx.destination);
-    attackOsc.start(now);
-    attackOsc.stop(now + 0.012);
+    // Delay between the first pre-click and the second main click (16ms)
+    // This double impact creates the realistic "pa-pa" (啪) signature sound of Go stones.
+    const mainDelay = 0.016; 
 
-    // 2. Ultra-short highpass noise burst (slate/shell friction click)
+    // ==========================================
+    // STRIKE 1: Pre-click (Initial touch / finger snap slip)
+    // ==========================================
+    const click1Osc = ctx.createOscillator();
+    const click1Gain = ctx.createGain();
+    click1Osc.type = 'sine';
+    // Very high pitch sweep for a tiny crisp contact click
+    click1Osc.frequency.setValueAtTime(5800, now);
+    click1Osc.frequency.exponentialRampToValueAtTime(1200, now + 0.007);
+    
+    click1Gain.gain.setValueAtTime(0.18, now);
+    click1Gain.gain.exponentialRampToValueAtTime(0.001, now + 0.007);
+    
+    click1Osc.connect(click1Gain);
+    click1Gain.connect(ctx.destination);
+    click1Osc.start(now);
+    click1Osc.stop(now + 0.008);
+
+    // ==========================================
+    // STRIKE 2: Main click & resonance (delayed by 16ms)
+    // ==========================================
+    const t2 = now + mainDelay;
+
+    // A. Main crisp contact clack
+    const click2Osc = ctx.createOscillator();
+    const click2Gain = ctx.createGain();
+    click2Osc.type = 'sine';
+    click2Osc.frequency.setValueAtTime(4600, t2);
+    click2Osc.frequency.exponentialRampToValueAtTime(800, t2 + 0.011);
+    
+    click2Gain.gain.setValueAtTime(0.48, t2);
+    click2Gain.gain.exponentialRampToValueAtTime(0.001, t2 + 0.011);
+    
+    click2Osc.connect(click2Gain);
+    click2Gain.connect(ctx.destination);
+    click2Osc.start(t2);
+    click2Osc.stop(t2 + 0.013);
+
+    // B. Main transient high-pass noise burst for organic texture
     const bufferSize = ctx.sampleRate * 0.008; // 8ms of noise
     const noiseBuffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate);
     const channelData = noiseBuffer.getChannelData(0);
@@ -57,45 +83,45 @@ export function playStoneSound() {
     
     const noiseFilter = ctx.createBiquadFilter();
     noiseFilter.type = 'highpass';
-    noiseFilter.frequency.setValueAtTime(3500, now); // Keep only crisp high frequencies
+    noiseFilter.frequency.setValueAtTime(3200, t2);
     
     const noiseGain = ctx.createGain();
-    noiseGain.gain.setValueAtTime(0.25, now);
-    noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.006);
+    noiseGain.gain.setValueAtTime(0.24, t2);
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, t2 + 0.007);
     
     noiseSource.connect(noiseFilter);
     noiseFilter.connect(noiseGain);
     noiseGain.connect(ctx.destination);
-    noiseSource.start(now);
-    noiseSource.stop(now + 0.008);
+    noiseSource.start(t2);
+    noiseSource.stop(t2 + 0.008);
 
-    // 3. Resonant wood board body (the Kaya wood thump)
+    // C. Wooden board resonance (Kaya wood thud)
     const boardOsc = ctx.createOscillator();
     const boardGain = ctx.createGain();
     boardOsc.type = 'triangle';
-    boardOsc.frequency.setValueAtTime(420, now); // slightly higher frequency for definition
-    boardOsc.frequency.exponentialRampToValueAtTime(210, now + 0.05);
+    boardOsc.frequency.setValueAtTime(390, t2);
+    boardOsc.frequency.exponentialRampToValueAtTime(180, t2 + 0.05);
 
-    boardGain.gain.setValueAtTime(0.32, now);
-    boardGain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+    boardGain.gain.setValueAtTime(0.3, t2);
+    boardGain.gain.exponentialRampToValueAtTime(0.001, t2 + 0.05);
 
     boardOsc.connect(boardGain);
     boardGain.connect(ctx.destination);
-    boardOsc.start(now);
-    boardOsc.stop(now + 0.06);
+    boardOsc.start(t2);
+    boardOsc.stop(t2 + 0.06);
 
-    // 4. Low-frequency cabinet cavity resonance (depth/thud)
+    // D. Low cabinet cavity thump
     const cavityOsc = ctx.createOscillator();
     const cavityGain = ctx.createGain();
     cavityOsc.type = 'sine';
-    cavityOsc.frequency.setValueAtTime(95, now);
-    cavityGain.gain.setValueAtTime(0.12, now);
-    cavityGain.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+    cavityOsc.frequency.setValueAtTime(90, t2);
+    cavityGain.gain.setValueAtTime(0.1, t2);
+    cavityGain.gain.exponentialRampToValueAtTime(0.001, t2 + 0.1);
 
     cavityOsc.connect(cavityGain);
     cavityGain.connect(ctx.destination);
-    cavityOsc.start(now);
-    cavityOsc.stop(now + 0.11);
+    cavityOsc.start(t2);
+    cavityOsc.stop(t2 + 0.11);
   } catch (e) {
     console.warn('Failed to play stone sound:', e);
   }
