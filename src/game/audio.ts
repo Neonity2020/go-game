@@ -128,6 +128,76 @@ export function playStoneSound() {
 }
 
 /**
+ * Synthesizes a stone capture sound — a crisp "tok" of stones being plucked off the board,
+ * followed by a gentle clatter as they settle into the lid.
+ */
+export function playCaptureSound() {
+  try {
+    const ctx = getAudioContext();
+    const now = ctx.currentTime;
+
+    // A. Quick upward pluck — stone lifted off the board
+    const pluckOsc = ctx.createOscillator();
+    const pluckGain = ctx.createGain();
+    pluckOsc.type = 'triangle';
+    pluckOsc.frequency.setValueAtTime(800, now);
+    pluckOsc.frequency.exponentialRampToValueAtTime(2200, now + 0.015);
+
+    pluckGain.gain.setValueAtTime(0.22, now);
+    pluckGain.gain.exponentialRampToValueAtTime(0.001, now + 0.018);
+
+    pluckOsc.connect(pluckGain);
+    pluckGain.connect(ctx.destination);
+    pluckOsc.start(now);
+    pluckOsc.stop(now + 0.02);
+
+    // B. Stone-on-stone clatter — short midrange noise burst
+    const bufSize = Math.floor(ctx.sampleRate * 0.04);
+    const noiseBuf = ctx.createBuffer(1, bufSize, ctx.sampleRate);
+    const data = noiseBuf.getChannelData(0);
+    for (let i = 0; i < bufSize; i++) {
+      data[i] = Math.random() * 2 - 1;
+    }
+    const noiseSrc = ctx.createBufferSource();
+    noiseSrc.buffer = noiseBuf;
+
+    const bp = ctx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.setValueAtTime(1400, now + 0.02);
+    bp.Q.setValueAtTime(2.0, now + 0.02);
+
+    const nGain = ctx.createGain();
+    nGain.gain.setValueAtTime(0.0, now);
+    nGain.gain.linearRampToValueAtTime(0.2, now + 0.022);
+    nGain.gain.exponentialRampToValueAtTime(0.001, now + 0.06);
+
+    noiseSrc.connect(bp);
+    bp.connect(nGain);
+    nGain.connect(ctx.destination);
+    noiseSrc.start(now + 0.02);
+    noiseSrc.stop(now + 0.07);
+
+    // C. Settling "tok" — stones resting in the lid (wood-on-wood)
+    const tokOsc = ctx.createOscillator();
+    const tokGain = ctx.createGain();
+    tokOsc.type = 'sine';
+    tokOsc.frequency.setValueAtTime(420, now + 0.045);
+    tokOsc.frequency.exponentialRampToValueAtTime(150, now + 0.1);
+
+    tokGain.gain.setValueAtTime(0.0, now);
+    tokGain.gain.linearRampToValueAtTime(0.16, now + 0.048);
+    tokGain.gain.exponentialRampToValueAtTime(0.001, now + 0.12);
+
+    tokOsc.connect(tokGain);
+    tokGain.connect(ctx.destination);
+    tokOsc.start(now + 0.045);
+    tokOsc.stop(now + 0.13);
+  } catch (e) {
+    console.warn('Failed to play capture sound:', e);
+  }
+}
+
+/**
  * Triggers a highly realistic liquid droplet/bubble sound.
  * Real droplets plop from lower to higher frequencies with high filter resonance.
  */
@@ -151,7 +221,7 @@ function playWaterBubble() {
     osc.frequency.setValueAtTime(startFreq, now);
     osc.frequency.exponentialRampToValueAtTime(endFreq, now + 0.055);
 
-    gain.gain.setValueAtTime(isLowDrop ? 0.009 : 0.005, now);
+    gain.gain.setValueAtTime(isLowDrop ? 0.014 : 0.008, now);
     gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.06);
 
     // Resonant bandpass filter creates the "liquid" ringing hollow quality
@@ -190,11 +260,15 @@ export function startBgm() {
       channelData[i] = Math.random() * 2 - 1;
     }
 
-    // Configure 3 independent audio bands for rich water layers
+    // Configure 4 independent audio bands — emphasizing water over wind:
+    // - Low/mid bands louder for deep current and splashes
+    // - High band toned down to reduce airy/windy quality
+    // - Added a dedicated gurgle band for liquid texture
     const bandsConfig = [
-      { centerFreq: 320, type: 'lowpass' as const, Q: 1.0, gain: 0.038, lfoRate: 0.04, lfoDepth: 80, name: 'deep current' },
-      { centerFreq: 750, type: 'bandpass' as const, Q: 2.0, gain: 0.015, lfoRate: 0.12, lfoDepth: 160, name: 'mid splashes' },
-      { centerFreq: 2200, type: 'bandpass' as const, Q: 3.0, gain: 0.008, lfoRate: 0.28, lfoDepth: 400, name: 'high babble' }
+      { centerFreq: 280, type: 'lowpass' as const, Q: 0.8, gain: 0.05, lfoRate: 0.035, lfoDepth: 70, name: 'deep current' },
+      { centerFreq: 550, type: 'bandpass' as const, Q: 1.8, gain: 0.03, lfoRate: 0.08, lfoDepth: 120, name: 'gurgle' },
+      { centerFreq: 900, type: 'bandpass' as const, Q: 2.0, gain: 0.02, lfoRate: 0.1, lfoDepth: 150, name: 'mid splashes' },
+      { centerFreq: 1600, type: 'bandpass' as const, Q: 2.5, gain: 0.008, lfoRate: 0.2, lfoDepth: 250, name: 'high babble' }
     ];
 
     bandsConfig.forEach((band) => {
@@ -232,12 +306,12 @@ export function startBgm() {
       lfoGains.push(lfoGain);
     });
 
-    // Schedule droplet triggers at irregular natural intervals
+    // Schedule droplet triggers — more frequent for richer water texture
     bubbleTimerId = setInterval(() => {
-      if (isBgmPlaying && Math.random() > 0.2) {
+      if (isBgmPlaying && Math.random() > 0.15) {
         playWaterBubble();
       }
-    }, 110);
+    }, 85);
 
   } catch (e) {
     console.error('Failed to start realistic water BGM:', e);

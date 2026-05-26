@@ -3,7 +3,7 @@ import Board from './Board';
 import type { GameState, MoveRecord, Position, ScoreResult, Stone, AnalysisResult, AnalysisMove, SavedGame } from '../game/types';
 import { calculateScore, createInitialState, isValidMove, pass, placeStone, resign, undo } from '../game/engine';
 import { getKataGoMove, getKataGoAnalysis } from '../game/katagoClient';
-import { playStoneSound, startBgm, stopBgm } from '../game/audio';
+import { playStoneSound, playCaptureSound, startBgm, stopBgm } from '../game/audio';
 
 type GameMode = 'pvp' | 'pve';
 type AIEngine = 'katago' | 'browser';
@@ -280,9 +280,13 @@ export default function GameApp() {
   useEffect(() => {
     if (moveCount > lastMoveCountRef.current) {
       playStoneSound();
+      const lastMove = currentViewedState.moveRecords[moveCount - 1];
+      if (lastMove && lastMove.captures > 0) {
+        playCaptureSound();
+      }
     }
     lastMoveCountRef.current = moveCount;
-  }, [moveCount]);
+  }, [moveCount, currentViewedState.moveRecords]);
 
   // Winrate history selection
   const effectiveWinRateHistory = useMemo(() => {
