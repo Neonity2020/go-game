@@ -1,336 +1,417 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import Board from './Board';
-import type { GameState, Position } from '../game/types';
-import { createInitialState, placeStone, pass, resign } from '../game/engine';
+import type { GameState, MoveRecord, Position, ScoreResult, Stone } from '../game/types';
+import { calculateScore, createInitialState, isValidMove, pass, placeStone, resign, undo } from '../game/engine';
+import { getKataGoMove } from '../game/katagoClient';
 
 type GameMode = 'pvp' | 'pve';
+type AIEngine = 'katago' | 'browser';
+type AIResult = Position | 'resign' | null;
+type AIWorkerResponse = { id: number; result: AIResult };
+type NigiriGuess = 'odd' | 'even';
+type NigiriState =
+  | { status: 'idle' }
+  | { status: 'pending'; hiddenStones: number }
+  | { status: 'revealed'; hiddenStones: number; guess: NigiriGuess; correct: boolean; humanColor: Stone };
 
 const BOARD_SIZES = [9, 13, 19] as const;
+const DEFAULT_KOMI = 6.5;
+const BOARD_LETTERS = 'ABCDEFGHJKLMNOPQRST';
 
-export default function App() {
+function createNigiri(): NigiriState {
+  return {
+    status: 'pending',
+    hiddenStones: Math.floor(Math.random() * 10) + 1,
+  };
+}
+
+function opponentOf(player: Stone): Stone {
+  return player === 'black' ? 'white' : 'black';
+}
+
+function playerLabel(player: Stone, gameMode: GameMode, humanColor: Stone) {
+  if (gameMode === 'pve') return player === humanColor ? '你' : 'AI';
+  return player === 'black' ? '黑方' : '白方';
+}
+
+function colorLabel(player: Stone) {
+  return player === 'black' ? '黑' : '白';
+}
+
+function guessLabel(guess: NigiriGuess) {
+  return guess === 'odd' ? '单数' : '双数';
+}
+
+function formatMove(record: MoveRecord, boardSize: number) {
+  if (!record.position) return '弃权';
+  const col = BOARD_LETTERS[record.position.col] ?? String(record.position.col + 1);
+  return `${col}${boardSize - record.position.row}`;
+}
+
+function formatWinner(score: ScoreResult, gameMode: GameMode, humanColor: Stone) {
+  if (score.winner === 'tie') return '平局';
+  return `${playerLabel(score.winner, gameMode, humanColor)}领先`;
+}
+
+function scoreLead(score: ScoreResult) {
+  const diff = Math.abs(score.blackTotal - score.whiteTotal);
+  return diff.toFixed(1);
+}
+
+function aiEngineLabel(engine: AIEngine) {
+  return engine === 'katago' ? 'KataGo' : '本地 AI';
+}
+
+export default function GameApp() {
   const [gameState, setGameState] = useState<GameState>(createInitialState(19));
   const [gameMode, setGameMode] = useState<GameMode>('pvp');
+  const [aiEngine, setAiEngine] = useState<AIEngine>('katago');
+  const [humanColor, setHumanColor] = useState<Stone>('black');
+  const [nigiri, setNigiri] = useState<NigiriState>({ status: 'idle' });
   const [aiThinking, setAiThinking] = useState(false);
+  const [komi, setKomi] = useState(DEFAULT_KOMI);
+  const [notice, setNotice] = useState('');
   const workerRef = useRef<Worker | null>(null);
   const aiPendingRef = useRef(false);
+  const aiRequestIdRef = useRef(0);
 
-  const { currentPlayer, captures, gameOver, passCount, boardSize } = gameState;
-  const moveCount = gameState.history.length;
+  const { currentPlayer, captures, gameOver, passCount, boardSize, moveRecords } = gameState;
+  const moveCount = moveRecords.length;
+  const nigiriPending = gameMode === 'pve' && nigiri.status === 'pending';
+  const isAiTurn = gameMode === 'pve' && !nigiriPending && currentPlayer !== humanColor && !gameOver;
+  const boardDisabled = gameOver || aiThinking || isAiTurn || nigiriPending;
 
-  const isAiTurn = gameMode === 'pve' && currentPlayer === 'white' && !gameOver;
+  const score = useMemo(() => calculateScore(gameState, komi), [gameState, komi]);
+  const boardFill = useMemo(() => {
+    const occupied = gameState.board.reduce(
+      (sum, row) => sum + row.filter(Boolean).length,
+      0,
+    );
+    return Math.round((occupied / (boardSize * boardSize)) * 100);
+  }, [boardSize, gameState.board]);
+  const recentMoves = moveRecords.slice(-10).reverse();
 
-  const handleMove = useCallback((pos: { row: number; col: number }) => {
-    if (gameMode === 'pve' && currentPlayer === 'white') return;
+  const applyAIResult = useCallback((aiResult: AIResult) => {
+    if (aiResult === 'resign') {
+      setGameState(prev => resign(prev));
+    } else if (aiResult) {
+      setGameState(prev => placeStone(prev, aiResult));
+    } else {
+      setGameState(prev => pass(prev));
+    }
+    setAiThinking(false);
+    aiPendingRef.current = false;
+  }, []);
+
+  const handleMove = useCallback((pos: Position) => {
+    if (gameMode === 'pve' && currentPlayer !== humanColor) return;
+    if (!isValidMove(gameState, pos)) {
+      setNotice('该位置不可落子');
+      return;
+    }
+    setNotice('');
     setGameState(prev => placeStone(prev, pos));
-  }, [gameMode, currentPlayer]);
+  }, [currentPlayer, gameMode, gameState, humanColor]);
 
   const handlePass = () => {
-    if (gameMode === 'pve' && currentPlayer === 'white') return;
+    if (gameMode === 'pve' && currentPlayer !== humanColor) return;
+    setNotice('');
     setGameState(prev => pass(prev));
   };
 
   const handleResign = () => {
+    setNotice('');
     setGameState(prev => resign(prev));
+  };
+
+  const handleUndo = () => {
+    if (aiThinking || moveRecords.length === 0) return;
+    setNotice('');
+    aiRequestIdRef.current += 1;
+    setGameState(prev => {
+      let next = undo(prev);
+      if (gameMode === 'pve' && next.currentPlayer !== humanColor && next.moveRecords.length > 0) {
+        next = undo(next);
+      }
+      return next;
+    });
+  };
+
+  const handleNigiriGuess = (guess: NigiriGuess) => {
+    if (nigiri.status !== 'pending') return;
+    const correct = (nigiri.hiddenStones % 2 === 1 && guess === 'odd') ||
+      (nigiri.hiddenStones % 2 === 0 && guess === 'even');
+    const nextHumanColor: Stone = correct ? 'black' : 'white';
+    setHumanColor(nextHumanColor);
+    setNigiri({
+      status: 'revealed',
+      hiddenStones: nigiri.hiddenStones,
+      guess,
+      correct,
+      humanColor: nextHumanColor,
+    });
+    setNotice(correct ? '猜中，你执黑先行' : '未猜中，你执白后行');
   };
 
   const handleNewGame = (size: number, mode: GameMode) => {
     setGameMode(mode);
     setAiThinking(false);
+    setNotice('');
+    setHumanColor('black');
+    setNigiri(mode === 'pve' ? createNigiri() : { status: 'idle' });
+    aiRequestIdRef.current += 1;
     aiPendingRef.current = false;
     setGameState(createInitialState(size));
   };
 
-  // Init worker
   useEffect(() => {
     workerRef.current = new Worker(new URL('../game/aiWorker.ts', import.meta.url), { type: 'module' });
-    workerRef.current.onmessage = (e: MessageEvent<Position | 'resign' | null>) => {
-      const aiResult = e.data;
-      if (aiResult === 'resign') {
-        setGameState(prev => resign(prev));
-      } else if (aiResult) {
-        setGameState(prev => placeStone(prev, aiResult));
-      } else {
-        setGameState(prev => pass(prev));
-      }
-      setAiThinking(false);
-      aiPendingRef.current = false;
+    workerRef.current.onmessage = (e: MessageEvent<AIWorkerResponse>) => {
+      if (e.data.id !== aiRequestIdRef.current) return;
+      applyAIResult(e.data.result);
     };
-    return () => { workerRef.current?.terminate(); };
-  }, []);
+    return () => {
+      workerRef.current?.terminate();
+    };
+  }, [applyAIResult]);
 
-  // AI move
   useEffect(() => {
     if (!isAiTurn || aiPendingRef.current) return;
     aiPendingRef.current = true;
     setAiThinking(true);
-    workerRef.current?.postMessage({ state: gameState });
-  }, [isAiTurn, gameState]);
+    setNotice('');
+    const requestId = aiRequestIdRef.current + 1;
+    aiRequestIdRef.current = requestId;
+
+    if (aiEngine === 'katago') {
+      getKataGoMove(gameState, komi)
+        .then(result => {
+          if (requestId !== aiRequestIdRef.current) return;
+          applyAIResult(result);
+        })
+        .catch(() => {
+          if (requestId !== aiRequestIdRef.current) return;
+          setNotice('KataGo bridge 未连接，已改用本地 AI');
+          workerRef.current?.postMessage({ id: requestId, state: gameState });
+        });
+      return;
+    }
+
+    workerRef.current?.postMessage({ id: requestId, state: gameState });
+  }, [aiEngine, applyAIResult, gameState, isAiTurn, komi]);
 
   const statusText = () => {
+    if (nigiriPending) return '猜先决定执黑';
     if (gameOver) {
-      if (passCount >= 2) return '对局结束（双方弃权）';
-      return `${currentPlayer === 'black' ? '白方' : '黑方'}获胜（对方认输）`;
+      if (passCount >= 2) return `终局，${formatWinner(score, gameMode, humanColor)} ${scoreLead(score)} 目`;
+      return `${playerLabel(opponentOf(currentPlayer), gameMode, humanColor)}获胜，对方认输`;
     }
-    if (aiThinking) return 'AI 思考中...';
-    const playerName = gameMode === 'pve'
-      ? (currentPlayer === 'black' ? '你' : 'AI')
-      : (currentPlayer === 'black' ? '黑方' : '白方');
-    return `${playerName}落子`;
+    if (aiThinking) return `${aiEngineLabel(aiEngine)} 正在计算`;
+    return `${playerLabel(currentPlayer, gameMode, humanColor)}落子`;
   };
 
+  const statusTone = gameOver || nigiriPending ? 'status-ended' : currentPlayer === 'black' ? 'status-black' : 'status-white';
+  const playerColorText = gameMode === 'pve' && !nigiriPending ? `你执${colorLabel(humanColor)}` : null;
+
   return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <img src="/logo.png" alt="围棋" style={styles.logo} />
-        <h1 style={styles.title}>围棋</h1>
-      </div>
+    <div className="app-shell">
+      <header className="topbar">
+        <div className="brand">
+          <img src="/logo.png" alt="" className="brand-logo" />
+          <div>
+            <h1>围棋</h1>
+            <p>{gameMode === 'pve' ? '人机对弈' : '双人对弈'} · {boardSize} 路棋盘{playerColorText ? ` · ${playerColorText}` : ''}</p>
+          </div>
+        </div>
 
-      <div style={styles.main}>
-        <Board state={gameState} onMove={handleMove} />
+        <div className="quick-stats" aria-label="对局概要">
+          <span>第 {moveCount} 手</span>
+          <span>占用 {boardFill}%</span>
+          <span>贴目 {komi.toFixed(1)}</span>
+        </div>
+      </header>
 
-        <div style={styles.panel}>
-          <div style={styles.status}>
-            <span style={{ display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center' }}>
-              {!gameOver && !aiThinking && (
-                <span style={{
-                  ...styles.stoneIndicator,
-                  background: currentPlayer === 'black'
-                    ? 'radial-gradient(circle at 35% 35%, #555, #111)'
-                    : 'radial-gradient(circle at 35% 35%, #fff, #ccc)',
-                  border: currentPlayer === 'white' ? '1px solid #999' : 'none',
-                }} />
+      <main className="game-layout">
+        <section className="board-section" aria-label="棋盘">
+          <Board state={gameState} onMove={handleMove} disabled={boardDisabled} />
+        </section>
+
+        <aside className="side-panel">
+          <section className="status-block">
+            <div className={`turn-chip ${statusTone}`}>
+              {!gameOver && !aiThinking && !nigiriPending && <span className={`stone-dot ${currentPlayer}`} />}
+              {aiThinking && <span className="spinner" />}
+              <span>{statusText()}</span>
+            </div>
+            {notice && <div className="notice">{notice}</div>}
+          </section>
+
+          {gameMode === 'pve' && (
+            <section className="panel-section nigiri-card">
+              <div className="section-heading">
+                <h2>猜先</h2>
+                {nigiri.status === 'revealed' && <span>{nigiri.correct ? '猜中' : '未中'}</span>}
+              </div>
+              {nigiri.status === 'pending' && (
+                <>
+                  <div className="nigiri-stones" aria-hidden="true">
+                    <span />
+                    <span />
+                    <span />
+                    <span />
+                    <span />
+                  </div>
+                  <div className="nigiri-actions">
+                    <button type="button" onClick={() => handleNigiriGuess('odd')}>单数</button>
+                    <button type="button" onClick={() => handleNigiriGuess('even')}>双数</button>
+                  </div>
+                </>
               )}
-              {aiThinking && <span style={styles.spinner} />}
-              {statusText()}
-            </span>
-          </div>
-
-          <div style={styles.captures}>
-            <div style={styles.captureItem}>
-              <span style={{ ...styles.captureStone, background: 'radial-gradient(circle at 35% 35%, #555, #111)' }} />
-              {gameMode === 'pve' ? '你' : '黑方'}提子: {captures.black}
-            </div>
-            <div style={styles.captureItem}>
-              <span style={{ ...styles.captureStone, background: 'radial-gradient(circle at 35% 35%, #fff, #ccc)', border: '1px solid #999' }} />
-              {gameMode === 'pve' ? 'AI' : '白方'}提子: {captures.white}
-            </div>
-          </div>
-
-          <div style={styles.moveCount}>第 {moveCount} 手</div>
-
-          {!gameOver && !aiThinking && (
-            <div style={styles.actions}>
-              <button onClick={handlePass} style={styles.button}>弃权 (Pass)</button>
-              <button onClick={handleResign} style={{ ...styles.button, ...styles.resignButton }}>认输</button>
-            </div>
+              {nigiri.status === 'revealed' && (
+                <div className="nigiri-result">
+                  <span>AI 取子 {nigiri.hiddenStones}</span>
+                  <span>你猜 {guessLabel(nigiri.guess)}</span>
+                  <strong>你执{colorLabel(nigiri.humanColor)}</strong>
+                </div>
+              )}
+            </section>
           )}
 
-          <div style={styles.newGame}>
-            <div style={styles.newGameLabel}>新对局</div>
-            <div style={styles.modeButtons}>
+          <section className="panel-section captures-grid" aria-label="提子数">
+            <div>
+              <span className="section-label">{playerLabel('black', gameMode, humanColor)}</span>
+              <strong>{captures.black}</strong>
+              <small>黑方提子</small>
+            </div>
+            <div>
+              <span className="section-label">{playerLabel('white', gameMode, humanColor)}</span>
+              <strong>{captures.white}</strong>
+              <small>白方提子</small>
+            </div>
+          </section>
+
+          <section className="panel-section action-row" aria-label="对局操作">
+            <button type="button" onClick={handleUndo} disabled={aiThinking || moveRecords.length === 0}>
+              悔棋
+            </button>
+            <button type="button" onClick={handlePass} disabled={boardDisabled}>
+              弃权
+            </button>
+            <button type="button" className="danger-button" onClick={handleResign} disabled={gameOver || nigiriPending}>
+              认输
+            </button>
+          </section>
+
+          <section className="panel-section">
+            <div className="section-heading">
+              <h2>形势</h2>
+              <label className="komi-control">
+                贴目
+                <input
+                  type="number"
+                  min="0"
+                  max="20"
+                  step="0.5"
+                  value={komi}
+                  onChange={event => setKomi(Number(event.target.value) || 0)}
+                />
+              </label>
+            </div>
+            <div className="score-summary">
+              <div>
+                <span>黑</span>
+                <strong>{score.blackTotal.toFixed(1)}</strong>
+                <small>子 {score.blackStones} · 空 {score.blackTerritory}</small>
+              </div>
+              <div>
+                <span>白</span>
+                <strong>{score.whiteTotal.toFixed(1)}</strong>
+                <small>子 {score.whiteStones} · 空 {score.whiteTerritory}</small>
+              </div>
+            </div>
+            <p className="score-lead">
+              {formatWinner(score, gameMode, humanColor)} {scoreLead(score)} 目
+            </p>
+          </section>
+
+          <section className="panel-section">
+            <div className="section-heading">
+              <h2>新对局</h2>
+            </div>
+            <div className="segmented-control" role="group" aria-label="对局模式">
               <button
+                type="button"
+                className={gameMode === 'pvp' ? 'active' : ''}
                 onClick={() => handleNewGame(boardSize, 'pvp')}
-                style={{ ...styles.modeButton, ...(gameMode === 'pvp' ? styles.modeButtonActive : {}) }}
               >
-                双人对战
+                双人
               </button>
               <button
+                type="button"
+                className={gameMode === 'pve' ? 'active' : ''}
                 onClick={() => handleNewGame(boardSize, 'pve')}
-                style={{ ...styles.modeButton, ...(gameMode === 'pve' ? styles.modeButtonActive : {}) }}
               >
-                人机对战
+                人机
               </button>
             </div>
-            <div style={styles.sizeButtons}>
+            <div className="segmented-control size-control" role="group" aria-label="棋盘尺寸">
               {BOARD_SIZES.map(size => (
                 <button
                   key={size}
+                  type="button"
+                  className={boardSize === size ? 'active' : ''}
                   onClick={() => handleNewGame(size, gameMode)}
-                  style={{
-                    ...styles.sizeButton,
-                    ...(boardSize === size ? styles.sizeButtonActive : {}),
-                  }}
                 >
-                  {size}×{size}
+                  {size}路
                 </button>
               ))}
             </div>
-          </div>
-        </div>
-      </div>
+          </section>
+
+          {gameMode === 'pve' && (
+            <section className="panel-section">
+              <div className="section-heading">
+                <h2>AI 引擎</h2>
+              </div>
+              <div className="segmented-control" role="group" aria-label="AI 引擎">
+                <button
+                  type="button"
+                  className={aiEngine === 'katago' ? 'active' : ''}
+                  onClick={() => setAiEngine('katago')}
+                  disabled={aiThinking}
+                >
+                  KataGo
+                </button>
+                <button
+                  type="button"
+                  className={aiEngine === 'browser' ? 'active' : ''}
+                  onClick={() => setAiEngine('browser')}
+                  disabled={aiThinking}
+                >
+                  本地
+                </button>
+              </div>
+            </section>
+          )}
+
+          <section className="panel-section move-list-section">
+            <div className="section-heading">
+              <h2>手顺</h2>
+              <span>{moveCount ? `最近 ${recentMoves.length} 手` : '暂无'}</span>
+            </div>
+            <ol className="move-list">
+              {recentMoves.map(record => (
+                <li key={record.moveNumber}>
+                  <span>{record.moveNumber}</span>
+                  <b>{playerLabel(record.player, gameMode, humanColor)}</b>
+                  <em>{formatMove(record, boardSize)}</em>
+                  {record.captures > 0 && <small>提 {record.captures}</small>}
+                </li>
+              ))}
+            </ol>
+          </section>
+        </aside>
+      </main>
     </div>
   );
 }
-
-const spinnerKeyframes = `
-@keyframes spin {
-  to { transform: rotate(360deg); }
-}
-`;
-const styleSheet = document.createElement('style');
-styleSheet.textContent = spinnerKeyframes;
-document.head.appendChild(styleSheet);
-
-const styles: Record<string, React.CSSProperties> = {
-  container: {
-    minHeight: '100vh',
-    background: '#1a1a2e',
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    padding: '20px',
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-    color: '#e0e0e0',
-  },
-  header: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 16,
-    marginBottom: 20,
-  },
-  logo: {
-    width: 48,
-    height: 48,
-    borderRadius: 8,
-  },
-  title: {
-    margin: 0,
-    fontSize: '28px',
-    fontWeight: 600,
-    color: '#f0d060',
-    letterSpacing: '8px',
-  },
-  main: {
-    display: 'flex',
-    gap: '24px',
-    alignItems: 'flex-start',
-    flexWrap: 'wrap',
-    justifyContent: 'center',
-  },
-  panel: {
-    background: '#16213e',
-    borderRadius: '12px',
-    padding: '24px',
-    minWidth: '220px',
-    display: 'flex',
-    flexDirection: 'column',
-    gap: '16px',
-    border: '1px solid #2a3a5e',
-  },
-  status: {
-    fontSize: '18px',
-    fontWeight: 600,
-    textAlign: 'center' as const,
-    padding: '8px',
-  },
-  spinner: {
-    display: 'inline-block',
-    width: 16,
-    height: 16,
-    border: '2px solid #2a3a5e',
-    borderTopColor: '#f0d060',
-    borderRadius: '50%',
-    animation: 'spin 0.8s linear infinite',
-  },
-  stoneIndicator: {
-    display: 'inline-block',
-    width: 20,
-    height: 20,
-    borderRadius: '50%',
-    verticalAlign: 'middle',
-  },
-  captures: {
-    display: 'flex',
-    flexDirection: 'column' as const,
-    gap: 8,
-  },
-  captureItem: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 8,
-    fontSize: '14px',
-  },
-  captureStone: {
-    display: 'inline-block',
-    width: 16,
-    height: 16,
-    borderRadius: '50%',
-    flexShrink: 0,
-  },
-  moveCount: {
-    textAlign: 'center' as const,
-    fontSize: '14px',
-    color: '#888',
-  },
-  actions: {
-    display: 'flex',
-    gap: 8,
-  },
-  button: {
-    flex: 1,
-    padding: '10px 16px',
-    border: 'none',
-    borderRadius: 8,
-    fontSize: '14px',
-    fontWeight: 600,
-    cursor: 'pointer',
-    background: '#2a3a5e',
-    color: '#e0e0e0',
-    transition: 'background 0.2s',
-  },
-  resignButton: {
-    background: '#5e2a2a',
-  },
-  newGame: {
-    borderTop: '1px solid #2a3a5e',
-    paddingTop: 12,
-    display: 'flex',
-    flexDirection: 'column' as const,
-    gap: 8,
-  },
-  newGameLabel: {
-    fontSize: '14px',
-    color: '#888',
-  },
-  modeButtons: {
-    display: 'flex',
-    gap: 6,
-  },
-  modeButton: {
-    flex: 1,
-    padding: '8px',
-    border: '1px solid #2a3a5e',
-    borderRadius: 6,
-    background: 'transparent',
-    color: '#aaa',
-    cursor: 'pointer',
-    fontSize: '13px',
-    fontWeight: 600,
-    transition: 'all 0.2s',
-  },
-  modeButtonActive: {
-    background: '#2a3a5e',
-    color: '#f0d060',
-    borderColor: '#f0d060',
-  },
-  sizeButtons: {
-    display: 'flex',
-    gap: 6,
-  },
-  sizeButton: {
-    flex: 1,
-    padding: '8px',
-    border: '1px solid #2a3a5e',
-    borderRadius: 6,
-    background: 'transparent',
-    color: '#aaa',
-    cursor: 'pointer',
-    fontSize: '13px',
-    transition: 'all 0.2s',
-  },
-  sizeButtonActive: {
-    background: '#2a3a5e',
-    color: '#f0d060',
-    borderColor: '#f0d060',
-  },
-};

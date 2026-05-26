@@ -231,7 +231,7 @@ function computeAIMove(state: GameState): AIResult {
   return bestPos;
 }
 
-self.onmessage = (e: MessageEvent<{ state: GameState }>) => {
+self.onmessage = (e: MessageEvent<{ id: number; state: GameState }>) => {
   const result = computeAIMove(e.data.state);
-  self.postMessage(result);
+  self.postMessage({ id: e.data.id, result });
 };

@@ -1,4 +1,4 @@
-import type { Stone, Position, GameState } from './types';
+import type { Stone, Position, GameState, ScoreResult } from './types';
 
 function createEmptyBoard(size: number): (Stone | null)[][] {
   return Array.from({ length: size }, () => Array(size).fill(null));
@@ -56,15 +56,6 @@ export function getLiberties(board: (Stone | null)[][], group: Position[], size:
   return libertySet.size;
 }
 
-function boardsEqual(a: (Stone | null)[][], b: (Stone | null)[][]): boolean {
-  for (let r = 0; r < a.length; r++) {
-    for (let c = 0; c < a[r].length; c++) {
-      if (a[r][c] !== b[r][c]) return false;
-    }
-  }
-  return true;
-}
-
 export function createInitialState(boardSize: number = 19): GameState {
   return {
     boardSize,
@@ -72,10 +63,12 @@ export function createInitialState(boardSize: number = 19): GameState {
     currentPlayer: 'black',
     captures: { black: 0, white: 0 },
     history: [],
+    capturesHistory: [],
     koPoint: null,
     passCount: 0,
     gameOver: false,
     lastMove: null,
+    moveRecords: [],
   };
 }
 
@@ -141,7 +134,7 @@ export function placeStone(state: GameState, pos: Position): GameState {
     }
   }
 
-  // Ko detection: single stone captured, and the capturing stone has no liberties other than the captured point
+  // Ko detection
   let koPoint: Position | null = null;
   if (capturedCount === 1 && capturedSingle) {
     const ownGroup = getGroup(newBoard, pos, boardSize);
@@ -153,16 +146,25 @@ export function placeStone(state: GameState, pos: Position): GameState {
   const newCaptures = { ...captures };
   newCaptures[currentPlayer] += capturedCount;
 
+  const moveRecord = {
+    moveNumber: state.moveRecords.length + 1,
+    player: currentPlayer,
+    position: pos,
+    captures: capturedCount,
+  };
+
   return {
     boardSize,
     board: newBoard,
     currentPlayer: opponent,
     captures: newCaptures,
     history: [...state.history, board],
+    capturesHistory: [...state.capturesHistory, captures],
     koPoint,
     passCount: 0,
     gameOver: false,
     lastMove: pos,
+    moveRecords: [...state.moveRecords, moveRecord],
   };
 }
 
@@ -172,17 +174,139 @@ export function pass(state: GameState): GameState {
   const newPassCount = state.passCount + 1;
   const opponent: Stone = state.currentPlayer === 'black' ? 'white' : 'black';
 
+  const moveRecord = {
+    moveNumber: state.moveRecords.length + 1,
+    player: state.currentPlayer,
+    position: null,
+    captures: 0,
+  };
+
   return {
     ...state,
     currentPlayer: opponent,
     history: [...state.history, state.board],
+    capturesHistory: [...state.capturesHistory, state.captures],
     koPoint: null,
     passCount: newPassCount,
     gameOver: newPassCount >= 2,
     lastMove: null,
+    moveRecords: [...state.moveRecords, moveRecord],
   };
 }
 
 export function resign(state: GameState): GameState {
   return { ...state, gameOver: true };
+}
+
+function getTrailingPassCount(records: GameState['moveRecords']): number {
+  let count = 0;
+  for (let i = records.length - 1; i >= 0; i--) {
+    if (records[i].position !== null) break;
+    count++;
+  }
+  return Math.min(count, 2);
+}
+
+export function undo(state: GameState): GameState {
+  if (state.history.length === 0) return state;
+
+  const newHistory = [...state.history];
+  const prevBoard = newHistory.pop()!;
+
+  const newCapturesHistory = [...state.capturesHistory];
+  const prevCaptures = newCapturesHistory.pop() || { black: 0, white: 0 };
+
+  const newMoveRecords = [...state.moveRecords];
+  newMoveRecords.pop();
+
+  const opponent: Stone = state.currentPlayer === 'black' ? 'white' : 'black';
+
+  // Find last move from the remaining records
+  const lastRecord = newMoveRecords.length > 0 ? newMoveRecords[newMoveRecords.length - 1] : null;
+  const lastMove = lastRecord?.position || null;
+
+  return {
+    ...state,
+    board: prevBoard,
+    currentPlayer: opponent,
+    captures: prevCaptures,
+    history: newHistory,
+    capturesHistory: newCapturesHistory,
+    koPoint: null, // simplified: clear ko after undo
+    passCount: getTrailingPassCount(newMoveRecords),
+    gameOver: false,
+    lastMove,
+    moveRecords: newMoveRecords,
+  };
+}
+
+export function calculateScore(state: GameState, komi: number = 6.5): ScoreResult {
+  const { board, boardSize, captures } = state;
+  const visited = new Set<string>();
+  let blackTerritory = 0;
+  let whiteTerritory = 0;
+  let blackStones = 0;
+  let whiteStones = 0;
+
+  // Count stones
+  for (let r = 0; r < boardSize; r++) {
+    for (let c = 0; c < boardSize; c++) {
+      if (board[r][c] === 'black') blackStones++;
+      else if (board[r][c] === 'white') whiteStones++;
+    }
+  }
+
+  // Flood fill to find territory
+  for (let r = 0; r < boardSize; r++) {
+    for (let c = 0; c < boardSize; c++) {
+      const key = `${r},${c}`;
+      if (board[r][c] !== null || visited.has(key)) continue;
+
+      const region: Position[] = [];
+      const borders = new Set<Stone>();
+      const queue: Position[] = [{ row: r, col: c }];
+
+      while (queue.length > 0) {
+        const cur = queue.pop()!;
+        const ck = `${cur.row},${cur.col}`;
+        if (visited.has(ck)) continue;
+        const stone = board[cur.row][cur.col];
+        if (stone !== null) {
+          borders.add(stone);
+          continue;
+        }
+        visited.add(ck);
+        region.push(cur);
+        for (const nb of getNeighbors(cur, boardSize)) {
+          if (!visited.has(`${nb.row},${nb.col}`)) queue.push(nb);
+        }
+      }
+
+      if (borders.size === 1) {
+        if (borders.has('black')) blackTerritory += region.length;
+        else whiteTerritory += region.length;
+      }
+    }
+  }
+
+  const blackTotal = blackStones + blackTerritory + captures.black;
+  const whiteTotal = whiteStones + whiteTerritory + captures.white + komi;
+
+  let winner: Stone | 'tie';
+  if (blackTotal > whiteTotal) winner = 'black';
+  else if (whiteTotal > blackTotal) winner = 'white';
+  else winner = 'tie';
+
+  return {
+    blackTerritory,
+    whiteTerritory,
+    blackStones,
+    whiteStones,
+    blackCaptures: captures.black,
+    whiteCaptures: captures.white,
+    blackTotal,
+    whiteTotal,
+    komi,
+    winner,
+  };
 }
