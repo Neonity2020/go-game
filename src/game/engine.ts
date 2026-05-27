@@ -8,6 +8,50 @@ function cloneBoard(board: (Stone | null)[][]): (Stone | null)[][] {
   return board.map(row => [...row]);
 }
 
+export function getMaxHandicapStones(boardSize: number): number {
+  return boardSize === 9 ? 5 : 9;
+}
+
+export function normalizeHandicap(boardSize: number, handicap: number): number {
+  if (!Number.isFinite(handicap)) return 0;
+  const rounded = Math.round(handicap);
+  return Math.min(Math.max(rounded, 0), getMaxHandicapStones(boardSize));
+}
+
+export function getHandicapPositions(boardSize: number, handicap: number): Position[] {
+  const count = normalizeHandicap(boardSize, handicap);
+  if (count === 0) return [];
+
+  const low = boardSize === 9 ? 2 : 3;
+  const high = boardSize - low - 1;
+  const mid = Math.floor(boardSize / 2);
+
+  const center = { row: mid, col: mid };
+  if (count === 1) return [center];
+
+  const corners = [
+    { row: high, col: low },
+    { row: low, col: high },
+    { row: high, col: high },
+    { row: low, col: low },
+  ];
+
+  if (count <= 4) return corners.slice(0, count);
+  if (count === 5) return [...corners, center];
+
+  const sidePoints = [
+    { row: mid, col: low },
+    { row: mid, col: high },
+    { row: low, col: mid },
+    { row: high, col: mid },
+  ];
+
+  if (count === 6) return [...corners, ...sidePoints.slice(0, 2)];
+  if (count === 7) return [...corners, ...sidePoints.slice(0, 2), center];
+  if (count === 8) return [...corners, ...sidePoints];
+  return [...corners, ...sidePoints, center];
+}
+
 function getNeighbors(pos: Position, size: number): Position[] {
   const { row, col } = pos;
   const neighbors: Position[] = [];
@@ -56,11 +100,18 @@ export function getLiberties(board: (Stone | null)[][], group: Position[], size:
   return libertySet.size;
 }
 
-export function createInitialState(boardSize: number = 19): GameState {
+export function createInitialState(boardSize: number = 19, handicap: number = 0): GameState {
+  const normalizedHandicap = normalizeHandicap(boardSize, handicap);
+  const board = createEmptyBoard(boardSize);
+  for (const pos of getHandicapPositions(boardSize, normalizedHandicap)) {
+    board[pos.row][pos.col] = 'black';
+  }
+
   return {
     boardSize,
-    board: createEmptyBoard(boardSize),
-    currentPlayer: 'black',
+    handicap: normalizedHandicap,
+    board,
+    currentPlayer: normalizedHandicap > 0 ? 'white' : 'black',
     captures: { black: 0, white: 0 },
     history: [],
     capturesHistory: [],
@@ -155,6 +206,7 @@ export function placeStone(state: GameState, pos: Position): GameState {
 
   return {
     boardSize,
+    handicap: state.handicap,
     board: newBoard,
     currentPlayer: opponent,
     captures: newCaptures,

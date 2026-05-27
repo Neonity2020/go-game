@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import Board from './Board';
 import type { GameState, MoveRecord, Position, ScoreResult, Stone, AnalysisResult, AnalysisMove, SavedGame } from '../game/types';
-import { calculateScore, createInitialState, isValidMove, pass, placeStone, resign, undo } from '../game/engine';
+import { calculateScore, createInitialState, getMaxHandicapStones, isValidMove, normalizeHandicap, pass, placeStone, resign, undo } from '../game/engine';
 import { getKataGoMove, getKataGoAnalysis } from '../game/katagoClient';
 import { playStoneSound, playCaptureSound, startBgm, stopBgm } from '../game/audio';
 
@@ -22,7 +22,7 @@ const BOARD_LETTERS = 'ABCDEFGHJKLMNOPQRST';
 const STORAGE_KEY = 'go_game_history';
 
 function reconstructGameState(savedGame: SavedGame, stepNum: number): GameState {
-  let state = createInitialState(savedGame.boardSize);
+  let state = createInitialState(savedGame.boardSize, savedGame.handicap ?? 0);
   for (let i = 0; i < stepNum; i++) {
     const record = savedGame.moveRecords[i];
     if (record.position) {
@@ -78,6 +78,10 @@ function aiEngineLabel(engine: AIEngine) {
   return engine === 'katago' ? 'KataGo' : '本地 AI';
 }
 
+function handicapLabel(handicap: number) {
+  return handicap > 0 ? `让${handicap}子` : '互先';
+}
+
 export default function GameApp() {
   const [gameState, setGameState] = useState<GameState>(createInitialState(19));
   const [gameMode, setGameMode] = useState<GameMode>('pvp');
@@ -122,9 +126,9 @@ export default function GameApp() {
     };
   }, []);
 
-  const { currentPlayer, gameOver, passCount, boardSize, moveRecords } = gameState;
+  const { currentPlayer, gameOver, passCount, boardSize, moveRecords, handicap } = gameState;
 
-  const nigiriPending = gameMode === 'pve' && nigiri.status === 'pending';
+  const nigiriPending = gameMode === 'pve' && handicap === 0 && nigiri.status === 'pending';
   const isAiTurn = gameMode === 'pve' && !nigiriPending && currentPlayer !== humanColor && !gameOver;
 
   // Reconstruct state at specific review step
@@ -139,17 +143,24 @@ export default function GameApp() {
     if (isReviewMode && reviewGameState) return reviewGameState;
     return gameState;
   }, [isReviewMode, reviewGameState, trialState, gameState]);
+  const viewedHandicap = currentViewedState.handicap ?? 0;
+  const handicapOptions = useMemo(() => {
+    const max = getMaxHandicapStones(boardSize);
+    return Array.from({ length: max + 1 }, (_, index) => index);
+  }, [boardSize]);
 
   // Load history from localStorage
   useEffect(() => {
-    try {
-      const stored = localStorage.getItem(STORAGE_KEY);
-      if (stored) {
-        setSavedGames(JSON.parse(stored));
+    Promise.resolve().then(() => {
+      try {
+        const stored = localStorage.getItem(STORAGE_KEY);
+        if (stored) {
+          setSavedGames(JSON.parse(stored));
+        }
+      } catch (e) {
+        console.error('Failed to load saved games:', e);
       }
-    } catch (e) {
-      console.error('Failed to load saved games:', e);
-    }
+    });
   }, []);
 
   // Save game helper
@@ -193,14 +204,17 @@ export default function GameApp() {
         }),
         boardSize: gameState.boardSize,
         gameMode,
+        handicap: gameState.handicap,
         komi,
         winner: scoreResult.winner,
         scoreResult,
         moveRecords,
         winRateHistory,
       };
-      saveGameToHistory(gameToSave);
-      setHasSavedCurrentGame(true);
+      Promise.resolve().then(() => {
+        saveGameToHistory(gameToSave);
+        setHasSavedCurrentGame(true);
+      });
     }
   }, [gameOver, isReviewMode, hasSavedCurrentGame, gameState, gameMode, komi, moveRecords, winRateHistory, saveGameToHistory]);
 
@@ -271,8 +285,8 @@ export default function GameApp() {
       (sum, row) => sum + row.filter(Boolean).length,
       0,
     );
-    return Math.round((occupied / (boardSize * boardSize)) * 100);
-  }, [boardSize, currentViewedState.board]);
+    return Math.round((occupied / (currentViewedState.boardSize * currentViewedState.boardSize)) * 100);
+  }, [currentViewedState.boardSize, currentViewedState.board]);
   const recentMoves = currentViewedState.moveRecords.slice(-10).reverse();
 
   // Play stone sound when a move is made or navigated forward
@@ -370,17 +384,18 @@ export default function GameApp() {
     setNotice(correct ? '猜中，你执黑先行' : '未猜中，你执白后行');
   };
 
-  const handleNewGame = (size: number, mode: GameMode) => {
+  const handleNewGame = (size: number, mode: GameMode, requestedHandicap = handicap) => {
+    const nextHandicap = normalizeHandicap(size, requestedHandicap);
     setGameMode(mode);
     setAiThinking(false);
-    setNotice('');
+    setNotice(nextHandicap > 0 ? `${handicapLabel(nextHandicap)}，白方先行` : '');
     setHumanColor('black');
-    setNigiri(mode === 'pve' ? createNigiri() : { status: 'idle' });
+    setNigiri(mode === 'pve' && nextHandicap === 0 ? createNigiri() : { status: 'idle' });
     aiRequestIdRef.current += 1;
     aiPendingRef.current = false;
     setWinRateHistory([]);
     setAnalysisResult(null);
-    setGameState(createInitialState(size));
+    setGameState(createInitialState(size, nextHandicap));
     setIsReviewMode(false);
     setReviewGame(null);
     setReviewStep(0);
@@ -393,7 +408,7 @@ export default function GameApp() {
     setReviewStep(game.moveRecords.length);
     setIsReviewMode(true);
     setTrialState(null);
-    setGameState(createInitialState(game.boardSize));
+    setGameState(createInitialState(game.boardSize, game.handicap ?? 0));
   };
 
   const handleExitReview = () => {
@@ -584,7 +599,7 @@ export default function GameApp() {
           <img src="/logo.png" alt="" className="brand-logo" />
           <div>
             <h1>围棋</h1>
-            <p>{gameMode === 'pve' ? '人机对弈' : '双人对弈'} · {boardSize} 路棋盘{playerColorText ? ` · ${playerColorText}` : ''}</p>
+            <p>{gameMode === 'pve' ? '人机对弈' : '双人对弈'} · {currentViewedState.boardSize} 路棋盘{playerColorText ? ` · ${playerColorText}` : ''}</p>
           </div>
         </div>
 
@@ -592,6 +607,7 @@ export default function GameApp() {
           <span>第 {moveCount} 手</span>
           <span>占用 {boardFill}%</span>
           <span>贴目 {komi.toFixed(1)}</span>
+          <span>{handicapLabel(viewedHandicap)}</span>
         </div>
 
         <div className="header-actions">
@@ -690,6 +706,7 @@ export default function GameApp() {
                       }),
                       boardSize: gameState.boardSize,
                       gameMode,
+                      handicap: gameState.handicap,
                       komi,
                       winner: scoreResult.winner,
                       scoreResult,
@@ -921,6 +938,19 @@ export default function GameApp() {
                 </button>
               ))}
             </div>
+            <div className="option-label">让子</div>
+            <div className="segmented-control handicap-control" role="group" aria-label="让子数">
+              {handicapOptions.map(count => (
+                <button
+                  key={count}
+                  type="button"
+                  className={handicap === count ? 'active' : ''}
+                  onClick={() => handleNewGame(boardSize, gameMode, count)}
+                >
+                  {count === 0 ? '互先' : `${count}子`}
+                </button>
+              ))}
+            </div>
           </section>
 
           {gameMode === 'pve' && (
@@ -984,7 +1014,9 @@ export default function GameApp() {
                   >
                     <div className="history-item-header">
                       <span className="game-date">{game.date}</span>
-                      <span className="game-badge">{game.boardSize}路 · {game.gameMode === 'pve' ? '人机' : '双人'}</span>
+                      <span className="game-badge">
+                        {game.boardSize}路 · {game.gameMode === 'pve' ? '人机' : '双人'}{game.handicap ? ` · ${handicapLabel(game.handicap)}` : ''}
+                      </span>
                     </div>
                     <div className="history-item-body">
                       <span className="game-result">

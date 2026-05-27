@@ -63,6 +63,50 @@ function toGtpCoord(position, boardSize) {
   return `${columns[position.col]}${boardSize - position.row}`;
 }
 
+function getMaxHandicapStones(boardSize) {
+  return boardSize === 9 ? 5 : 9;
+}
+
+function normalizeHandicap(boardSize, handicap) {
+  if (!Number.isFinite(handicap)) return 0;
+  const rounded = Math.round(handicap);
+  return Math.min(Math.max(rounded, 0), getMaxHandicapStones(boardSize));
+}
+
+function getHandicapPositions(boardSize, handicap) {
+  const count = normalizeHandicap(boardSize, handicap);
+  if (count === 0) return [];
+
+  const low = boardSize === 9 ? 2 : 3;
+  const high = boardSize - low - 1;
+  const mid = Math.floor(boardSize / 2);
+
+  const center = { row: mid, col: mid };
+  if (count === 1) return [center];
+
+  const corners = [
+    { row: high, col: low },
+    { row: low, col: high },
+    { row: high, col: high },
+    { row: low, col: low },
+  ];
+
+  if (count <= 4) return corners.slice(0, count);
+  if (count === 5) return [...corners, center];
+
+  const sidePoints = [
+    { row: mid, col: low },
+    { row: mid, col: high },
+    { row: low, col: mid },
+    { row: high, col: mid },
+  ];
+
+  if (count === 6) return [...corners, ...sidePoints.slice(0, 2)];
+  if (count === 7) return [...corners, ...sidePoints.slice(0, 2), center];
+  if (count === 8) return [...corners, ...sidePoints];
+  return [...corners, ...sidePoints, center];
+}
+
 function fromGtpCoord(coord, boardSize) {
   const normalized = coord.trim().toLowerCase();
   if (normalized === 'pass') return null;
@@ -174,6 +218,10 @@ async function getMove(state, komi) {
   await sendGtp('clear_board');
   await sendGtp(`komi ${Number.isFinite(komi) ? komi : 6.5}`);
 
+  for (const position of getHandicapPositions(boardSize, state?.handicap ?? 0)) {
+    await sendGtp(`play B ${toGtpCoord(position, boardSize)}`);
+  }
+
   for (const move of moves) {
     await sendGtp(`play ${toGtpColor(move.player)} ${toGtpCoord(move.position, boardSize)}`);
   }
@@ -272,6 +320,10 @@ async function getAnalysis(state, komi, durationMs = 800) {
   await sendGtp(`boardsize ${boardSize}`);
   await sendGtp('clear_board');
   await sendGtp(`komi ${Number.isFinite(komi) ? komi : 6.5}`);
+
+  for (const position of getHandicapPositions(boardSize, state?.handicap ?? 0)) {
+    await sendGtp(`play B ${toGtpCoord(position, boardSize)}`);
+  }
 
   for (const move of moves) {
     await sendGtp(`play ${toGtpColor(move.player)} ${toGtpCoord(move.position, boardSize)}`);

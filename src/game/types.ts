@@ -42,6 +42,7 @@ export interface SavedGame {
   date: string;
   boardSize: number;
   gameMode: 'pvp' | 'pve';
+  handicap?: number;
   komi: number;
   winner: Stone | 'tie';
   scoreResult: ScoreResult;
@@ -51,6 +52,7 @@ export interface SavedGame {
 
 export interface GameState {
   boardSize: number;
+  handicap: number;
   board: (Stone | null)[][];
   currentPlayer: Stone;
   captures: { black: number; white: number };

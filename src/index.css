@@ -437,6 +437,17 @@ button:disabled {
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
+.option-label {
+  margin: 12px 0 6px;
+  color: #706a60;
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.handicap-control {
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+}
+
 .segmented-control button {
   border: 1px solid rgba(55, 50, 43, 0.16);
   background: #f4f1eb;

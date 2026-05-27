@@ -195,8 +195,7 @@ function computeAIMove(state: GameState): AIResult {
   if (state.history.length === 0) {
     const stars = getStarMoves(boardSize).filter(p => board[p.row][p.col] === null);
     if (stars.length > 0) return stars[Math.floor(Math.random() * stars.length)];
-    const c = Math.floor(boardSize / 2);
-    return { row: c, col: c };
+    return legalMoves[Math.floor(Math.random() * legalMoves.length)];
   }
 
   const candidates = getCandidates(board, currentPlayer, boardSize, koPoint);
