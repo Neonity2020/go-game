@@ -1,0 +1,793 @@
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+use std::{
+    env, fs,
+    io::{BufRead, BufReader, Read, Write},
+    net::{TcpListener, TcpStream},
+    path::PathBuf,
+    process::{Child, ChildStdout, Command, Stdio},
+    sync::{Arc, Mutex},
+    thread,
+    time::Duration,
+};
+
+const COLUMNS: &str = "ABCDEFGHJKLMNOPQRST";
+
+#[derive(Clone)]
+struct BridgeConfig {
+    port: u16,
+    katago_bin: PathBuf,
+    katago_model: Option<PathBuf>,
+    katago_config: Option<PathBuf>,
+    override_config: String,
+    log_dir: PathBuf,
+}
+
+impl BridgeConfig {
+    fn new() -> Self {
+        let port = env::var("KATAGO_BRIDGE_PORT")
+            .ok()
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(3107);
+
+        let katago_bin = env::var_os("KATAGO_BIN")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/opt/homebrew/bin/katago"));
+        let katago_share = env::var_os("KATAGO_SHARE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/opt/homebrew/opt/katago/share/katago"));
+        let log_dir = env::var_os("KATAGO_LOG_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| env::temp_dir().join("go-game-katago-logs"));
+
+        let model_candidates = [
+            env::var_os("KATAGO_MODEL").map(PathBuf::from),
+            Some(katago_share.join("kata1-b18c384nbt-s9996604416-d4316597426.bin.gz")),
+            Some(katago_share.join("g170e-b20c256x2-s5303129600-d1228401921.bin.gz")),
+            Some(katago_share.join("g170-b40c256x2-s5095420928-d1229425124.bin.gz")),
+        ];
+        let config_candidates = [
+            env::var_os("KATAGO_CONFIG").map(PathBuf::from),
+            Some(katago_share.join("configs/gtp_example.cfg")),
+        ];
+
+        let override_config = env::var("KATAGO_OVERRIDE_CONFIG").unwrap_or_else(|_| {
+            format!(
+                "maxVisits=96,numSearchThreads=4,ponderingEnabled=false,allowResignation=false,logDir={},logAllGTPCommunication=false,logSearchInfo=false,logToStderr=false",
+                log_dir.display()
+            )
+        });
+
+        Self {
+            port,
+            katago_bin,
+            katago_model: first_existing(&model_candidates),
+            katago_config: first_existing(&config_candidates),
+            override_config,
+            log_dir,
+        }
+    }
+}
+
+fn first_existing(candidates: &[Option<PathBuf>]) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .filter_map(|candidate| candidate.as_ref())
+        .find(|candidate| candidate.exists())
+        .cloned()
+}
+
+pub fn start_bridge_server() {
+    let config = BridgeConfig::new();
+    let address = format!("127.0.0.1:{}", config.port);
+
+    let listener = match TcpListener::bind(&address) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("KataGo bridge did not start on {address}: {error}");
+            return;
+        }
+    };
+
+    thread::spawn(move || {
+        eprintln!("KataGo bridge listening on http://{address}");
+        let bridge = Arc::new(Mutex::new(KataGoBridge::new(config.clone())));
+
+        for stream in listener.incoming() {
+            match stream {
+                Ok(stream) => {
+                    let bridge = Arc::clone(&bridge);
+                    let config = config.clone();
+                    thread::spawn(move || handle_connection(stream, bridge, config));
+                }
+                Err(error) => eprintln!("KataGo bridge connection error: {error}"),
+            }
+        }
+    });
+}
+
+struct HttpRequest {
+    method: String,
+    path: String,
+    body: String,
+}
+
+fn handle_connection(
+    mut stream: TcpStream,
+    bridge: Arc<Mutex<KataGoBridge>>,
+    config: BridgeConfig,
+) {
+    let request = match read_request(&mut stream) {
+        Ok(request) => request,
+        Err(error) => {
+            send_json(&mut stream, 400, json!({ "error": error }));
+            return;
+        }
+    };
+
+    if request.method == "OPTIONS" {
+        send_json(&mut stream, 204, json!({}));
+        return;
+    }
+
+    let response: Result<Value, String> = match (request.method.as_str(), request.path.as_str()) {
+        ("GET", "/health") => {
+            let running = bridge
+                .lock()
+                .map(|mut bridge| bridge.is_running())
+                .unwrap_or(false);
+            Ok(json!({
+                "ok": config.katago_bin.exists()
+                    && config.katago_model.is_some()
+                    && config.katago_config.is_some(),
+                "running": running,
+                "katagoBin": config.katago_bin,
+                "katagoModel": config.katago_model,
+                "katagoConfig": config.katago_config,
+                "port": config.port,
+            }))
+        }
+        ("POST", "/move") => match serde_json::from_str::<MovePayload>(&request.body) {
+            Ok(payload) => bridge
+                .lock()
+                .map_err(|_| "KataGo bridge lock poisoned".to_string())
+                .and_then(|mut bridge| bridge.get_move(&payload.state, payload.komi.unwrap_or(6.5)))
+                .map(|result| json!({ "engine": "katago", "result": result })),
+            Err(error) => Err(format!("Invalid JSON: {error}")),
+        },
+        ("POST", "/analyze") => match serde_json::from_str::<AnalysisPayload>(&request.body) {
+            Ok(payload) => {
+                let duration_ms = payload.duration_ms.unwrap_or(800);
+                bridge
+                    .lock()
+                    .map_err(|_| "KataGo bridge lock poisoned".to_string())
+                    .and_then(|mut bridge| {
+                        bridge.get_analysis(
+                            &payload.state,
+                            payload.komi.unwrap_or(6.5),
+                            duration_ms,
+                        )
+                    })
+                    .map(|analysis| json!({ "ok": true, "analysis": analysis }))
+            }
+            Err(error) => Err(format!("Invalid JSON: {error}")),
+        },
+        _ => Err("Not found".to_string()),
+    };
+
+    match response {
+        Ok(payload) => send_json(&mut stream, 200, payload),
+        Err(error) if error == "Not found" => {
+            send_json(&mut stream, 404, json!({ "error": error }))
+        }
+        Err(error) => send_json(&mut stream, 500, json!({ "error": error })),
+    }
+}
+
+fn read_request(stream: &mut TcpStream) -> Result<HttpRequest, String> {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+    let mut reader = BufReader::new(stream);
+
+    let mut request_line = String::new();
+    reader
+        .read_line(&mut request_line)
+        .map_err(|error| format!("Failed to read request: {error}"))?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts
+        .next()
+        .ok_or_else(|| "Missing HTTP method".to_string())?
+        .to_string();
+    let path = parts
+        .next()
+        .ok_or_else(|| "Missing HTTP path".to_string())?
+        .split('?')
+        .next()
+        .unwrap_or("/")
+        .to_string();
+
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        let bytes = reader
+            .read_line(&mut line)
+            .map_err(|error| format!("Failed to read headers: {error}"))?;
+        if bytes == 0 {
+            break;
+        }
+
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            break;
+        }
+
+        if let Some((name, value)) = line.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                content_length = value
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| "Invalid Content-Length".to_string())?;
+                if content_length > 2_000_000 {
+                    return Err("Request body too large".to_string());
+                }
+            }
+        }
+    }
+
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        reader
+            .read_exact(&mut body)
+            .map_err(|error| format!("Failed to read body: {error}"))?;
+    }
+
+    let body = String::from_utf8(body).map_err(|error| format!("Body is not UTF-8: {error}"))?;
+
+    Ok(HttpRequest { method, path, body })
+}
+
+fn send_json(stream: &mut TcpStream, status_code: u16, payload: Value) {
+    let reason = match status_code {
+        200 => "OK",
+        204 => "No Content",
+        400 => "Bad Request",
+        404 => "Not Found",
+        500 => "Internal Server Error",
+        _ => "OK",
+    };
+    let body = if status_code == 204 {
+        String::new()
+    } else {
+        payload.to_string()
+    };
+    let response = format!(
+        "HTTP/1.1 {status_code} {reason}\r\nContent-Type: application/json\r\nAccess-Control-Allow-Origin: *\r\nAccess-Control-Allow-Methods: GET,POST,OPTIONS\r\nAccess-Control-Allow-Headers: Content-Type\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+}
+
+struct KataGoBridge {
+    config: BridgeConfig,
+    process: Option<KataGoProcess>,
+}
+
+struct KataGoProcess {
+    child: Child,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl KataGoBridge {
+    fn new(config: BridgeConfig) -> Self {
+        Self {
+            config,
+            process: None,
+        }
+    }
+
+    fn is_running(&mut self) -> bool {
+        if let Some(process) = self.process.as_mut() {
+            match process.child.try_wait() {
+                Ok(None) => true,
+                Ok(Some(_)) | Err(_) => {
+                    self.process = None;
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    }
+
+    fn ensure_started(&mut self) -> Result<(), String> {
+        if let Some(process) = self.process.as_mut() {
+            match process.child.try_wait() {
+                Ok(None) => return Ok(()),
+                Ok(Some(status)) => {
+                    eprintln!("KataGo exited ({status}); restarting on next request");
+                    self.process = None;
+                }
+                Err(error) => return Err(format!("Failed to check KataGo process: {error}")),
+            }
+        }
+
+        if !self.config.katago_bin.exists() {
+            return Err(format!(
+                "KataGo binary not found: {}",
+                self.config.katago_bin.display()
+            ));
+        }
+        let katago_model = self.config.katago_model.as_ref().ok_or_else(|| {
+            "KataGo model not found. Set KATAGO_MODEL to a .bin.gz model path.".to_string()
+        })?;
+        let katago_config = self.config.katago_config.as_ref().ok_or_else(|| {
+            "KataGo config not found. Set KATAGO_CONFIG to a gtp config path.".to_string()
+        })?;
+
+        fs::create_dir_all(&self.config.log_dir)
+            .map_err(|error| format!("Failed to create KataGo log dir: {error}"))?;
+
+        let mut child = Command::new(&self.config.katago_bin)
+            .arg("gtp")
+            .arg("-config")
+            .arg(katago_config)
+            .arg("-model")
+            .arg(katago_model)
+            .arg("-override-config")
+            .arg(&self.config.override_config)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|error| format!("Failed to start KataGo: {error}"))?;
+
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| "Failed to capture KataGo stdout".to_string())?;
+        self.process = Some(KataGoProcess {
+            child,
+            stdout: BufReader::new(stdout),
+        });
+        Ok(())
+    }
+
+    fn send_gtp(&mut self, command: &str) -> Result<String, String> {
+        self.ensure_started()?;
+        let process = self
+            .process
+            .as_mut()
+            .ok_or_else(|| "KataGo process is unavailable".to_string())?;
+        let stdin = process
+            .child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "KataGo stdin is unavailable".to_string())?;
+
+        stdin
+            .write_all(command.as_bytes())
+            .and_then(|_| stdin.write_all(b"\n"))
+            .and_then(|_| stdin.flush())
+            .map_err(|error| format!("Failed to write to KataGo: {error}"))?;
+
+        read_gtp_response(process)
+    }
+
+    fn setup_position(&mut self, state: &GameStatePayload, komi: f64) -> Result<(), String> {
+        validate_state(state)?;
+        let board_size = state.board_size;
+        let komi = if komi.is_finite() { komi } else { 6.5 };
+
+        self.send_gtp(&format!("boardsize {board_size}"))?;
+        self.send_gtp("clear_board")?;
+        self.send_gtp(&format!("komi {komi}"))?;
+
+        for position in get_handicap_positions(board_size, state.handicap.unwrap_or(0)) {
+            self.send_gtp(&format!(
+                "play B {}",
+                to_gtp_coord(Some(position), board_size)?
+            ))?;
+        }
+
+        for move_record in &state.move_records {
+            let color = to_gtp_color(&move_record.player)?;
+            let coord = to_gtp_coord(move_record.position, board_size)?;
+            self.send_gtp(&format!("play {color} {coord}"))?;
+        }
+
+        Ok(())
+    }
+
+    fn get_move(&mut self, state: &GameStatePayload, komi: f64) -> Result<Value, String> {
+        self.setup_position(state, komi)?;
+        let raw_move =
+            self.send_gtp(&format!("genmove {}", to_gtp_color(&state.current_player)?))?;
+        let first_token = raw_move.split_whitespace().next().unwrap_or("pass");
+        Ok(parsed_move_to_json(parse_gtp_move(
+            first_token,
+            state.board_size,
+        )?))
+    }
+
+    fn get_analysis(
+        &mut self,
+        state: &GameStatePayload,
+        komi: f64,
+        duration_ms: u64,
+    ) -> Result<AnalysisResult, String> {
+        self.setup_position(state, komi)?;
+        self.ensure_started()?;
+        let process = self
+            .process
+            .as_mut()
+            .ok_or_else(|| "KataGo process is unavailable".to_string())?;
+        let stdin = process
+            .child
+            .stdin
+            .as_mut()
+            .ok_or_else(|| "KataGo stdin is unavailable".to_string())?;
+
+        stdin
+            .write_all(
+                format!("kata-analyze {} 10\n", to_gtp_color(&state.current_player)?).as_bytes(),
+            )
+            .and_then(|_| stdin.flush())
+            .map_err(|error| format!("Failed to start KataGo analysis: {error}"))?;
+
+        thread::sleep(Duration::from_millis(duration_ms.clamp(100, 10_000)));
+
+        stdin
+            .write_all(b"\n")
+            .and_then(|_| stdin.flush())
+            .map_err(|error| format!("Failed to stop KataGo analysis: {error}"))?;
+
+        let raw_stdout = read_gtp_response(process)?;
+        Ok(AnalysisResult {
+            current_player: state.current_player.clone(),
+            moves: parse_analysis(&raw_stdout, state.board_size),
+        })
+    }
+}
+
+impl Drop for KataGoBridge {
+    fn drop(&mut self) {
+        if let Some(process) = self.process.as_mut() {
+            let _ = process.child.kill();
+        }
+    }
+}
+
+fn read_gtp_response(process: &mut KataGoProcess) -> Result<String, String> {
+    let mut raw = String::new();
+
+    loop {
+        let mut line = String::new();
+        let bytes = process
+            .stdout
+            .read_line(&mut line)
+            .map_err(|error| format!("Failed to read from KataGo: {error}"))?;
+        if bytes == 0 {
+            return Err("KataGo exited".to_string());
+        }
+
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            break;
+        }
+
+        raw.push_str(line);
+        raw.push('\n');
+    }
+
+    let raw = raw.trim();
+    if raw.starts_with('?') {
+        return Err(raw.to_string());
+    }
+    Ok(raw.trim_start_matches('=').trim().to_string())
+}
+
+#[derive(Deserialize)]
+struct MovePayload {
+    state: GameStatePayload,
+    komi: Option<f64>,
+}
+
+#[derive(Deserialize)]
+struct AnalysisPayload {
+    state: GameStatePayload,
+    komi: Option<f64>,
+    #[serde(rename = "durationMs")]
+    duration_ms: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct GameStatePayload {
+    #[serde(rename = "boardSize")]
+    board_size: usize,
+    #[serde(rename = "currentPlayer")]
+    current_player: String,
+    #[serde(rename = "moveRecords")]
+    move_records: Vec<MoveRecordPayload>,
+    handicap: Option<i64>,
+}
+
+#[derive(Deserialize)]
+struct MoveRecordPayload {
+    player: String,
+    position: Option<Position>,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+struct Position {
+    row: usize,
+    col: usize,
+}
+
+#[derive(Serialize)]
+struct AnalysisResult {
+    #[serde(rename = "currentPlayer")]
+    current_player: String,
+    moves: Vec<AnalysisMove>,
+}
+
+#[derive(Serialize)]
+struct AnalysisMove {
+    position: Option<Position>,
+    #[serde(rename = "gtpMove")]
+    gtp_move: String,
+    visits: i64,
+    winrate: f64,
+    #[serde(rename = "scoreLead")]
+    score_lead: f64,
+    pv: Vec<String>,
+}
+
+enum ParsedGtpMove {
+    Position(Position),
+    Pass,
+    Resign,
+}
+
+fn validate_state(state: &GameStatePayload) -> Result<(), String> {
+    if !matches!(state.board_size, 9 | 13 | 19) {
+        return Err("Unsupported board size".to_string());
+    }
+    to_gtp_color(&state.current_player)?;
+    for move_record in &state.move_records {
+        to_gtp_color(&move_record.player)?;
+        if let Some(position) = move_record.position {
+            validate_position(position, state.board_size)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_position(position: Position, board_size: usize) -> Result<(), String> {
+    if position.row >= board_size || position.col >= board_size {
+        return Err("Position is outside the board".to_string());
+    }
+    Ok(())
+}
+
+fn to_gtp_color(player: &str) -> Result<&'static str, String> {
+    match player {
+        "black" => Ok("B"),
+        "white" => Ok("W"),
+        _ => Err("Invalid player".to_string()),
+    }
+}
+
+fn to_gtp_coord(position: Option<Position>, board_size: usize) -> Result<String, String> {
+    let Some(position) = position else {
+        return Ok("pass".to_string());
+    };
+    validate_position(position, board_size)?;
+    let column = COLUMNS
+        .chars()
+        .nth(position.col)
+        .ok_or_else(|| "Invalid column".to_string())?;
+    Ok(format!("{column}{}", board_size - position.row))
+}
+
+fn parse_gtp_move(coord: &str, board_size: usize) -> Result<ParsedGtpMove, String> {
+    let normalized = coord.trim().to_ascii_lowercase();
+    if normalized == "pass" {
+        return Ok(ParsedGtpMove::Pass);
+    }
+    if normalized == "resign" {
+        return Ok(ParsedGtpMove::Resign);
+    }
+
+    let mut chars = coord.chars();
+    let letter = chars
+        .next()
+        .ok_or_else(|| "Missing KataGo coordinate".to_string())?
+        .to_ascii_uppercase();
+    let col = COLUMNS
+        .find(letter)
+        .ok_or_else(|| format!("Invalid KataGo coordinate: {coord}"))?;
+    let row_number = chars
+        .as_str()
+        .parse::<usize>()
+        .map_err(|_| format!("Invalid KataGo coordinate: {coord}"))?;
+    if row_number == 0 || row_number > board_size {
+        return Err(format!("Invalid KataGo coordinate: {coord}"));
+    }
+    let row = board_size - row_number;
+    if col >= board_size {
+        return Err(format!("Invalid KataGo coordinate: {coord}"));
+    }
+    Ok(ParsedGtpMove::Position(Position { row, col }))
+}
+
+fn parsed_move_to_json(parsed: ParsedGtpMove) -> Value {
+    match parsed {
+        ParsedGtpMove::Position(position) => json!(position),
+        ParsedGtpMove::Pass => Value::Null,
+        ParsedGtpMove::Resign => json!("resign"),
+    }
+}
+
+fn get_max_handicap_stones(board_size: usize) -> i64 {
+    if board_size == 9 {
+        5
+    } else {
+        9
+    }
+}
+
+fn normalize_handicap(board_size: usize, handicap: i64) -> i64 {
+    handicap.clamp(0, get_max_handicap_stones(board_size))
+}
+
+fn get_handicap_positions(board_size: usize, handicap: i64) -> Vec<Position> {
+    let count = normalize_handicap(board_size, handicap);
+    if count == 0 {
+        return vec![];
+    }
+
+    let low = if board_size == 9 { 2 } else { 3 };
+    let high = board_size - low - 1;
+    let mid = board_size / 2;
+    let center = Position { row: mid, col: mid };
+    if count == 1 {
+        return vec![center];
+    }
+
+    let corners = [
+        Position {
+            row: high,
+            col: low,
+        },
+        Position {
+            row: low,
+            col: high,
+        },
+        Position {
+            row: high,
+            col: high,
+        },
+        Position { row: low, col: low },
+    ];
+    if count <= 4 {
+        return corners[..count as usize].to_vec();
+    }
+    if count == 5 {
+        return corners.into_iter().chain([center]).collect();
+    }
+
+    let side_points = [
+        Position { row: mid, col: low },
+        Position {
+            row: mid,
+            col: high,
+        },
+        Position { row: low, col: mid },
+        Position {
+            row: high,
+            col: mid,
+        },
+    ];
+    let mut positions = corners.to_vec();
+
+    match count {
+        6 => positions.extend_from_slice(&side_points[..2]),
+        7 => {
+            positions.extend_from_slice(&side_points[..2]);
+            positions.push(center);
+        }
+        8 => positions.extend_from_slice(&side_points),
+        _ => {
+            positions.extend_from_slice(&side_points);
+            positions.push(center);
+        }
+    }
+    positions
+}
+
+fn parse_analysis(raw_stdout: &str, board_size: usize) -> Vec<AnalysisMove> {
+    let Some(target_line) = raw_stdout
+        .lines()
+        .rev()
+        .find(|line| line.contains("info move"))
+    else {
+        return vec![];
+    };
+
+    let mut moves = Vec::new();
+    for raw in target_line
+        .split("info ")
+        .filter(|part| !part.trim().is_empty())
+    {
+        let tokens = raw.split_whitespace().collect::<Vec<_>>();
+        if tokens.first() != Some(&"move") {
+            continue;
+        }
+
+        let mut move_coord = None;
+        let mut visits = 0i64;
+        let mut winrate = 0.0f64;
+        let mut score_lead = 0.0f64;
+        let mut pv = Vec::new();
+        let mut index = 0usize;
+
+        while index < tokens.len() {
+            match tokens[index] {
+                "move" if index + 1 < tokens.len() => {
+                    move_coord = Some(tokens[index + 1].to_string());
+                    index += 2;
+                }
+                "visits" if index + 1 < tokens.len() => {
+                    visits = tokens[index + 1].parse::<i64>().unwrap_or(0);
+                    index += 2;
+                }
+                "winrate" if index + 1 < tokens.len() => {
+                    winrate = tokens[index + 1].parse::<f64>().unwrap_or(0.0);
+                    index += 2;
+                }
+                "scoreLead" if index + 1 < tokens.len() => {
+                    score_lead = tokens[index + 1].parse::<f64>().unwrap_or(0.0);
+                    index += 2;
+                }
+                "pv" => {
+                    pv.extend(tokens[index + 1..].iter().map(|token| token.to_string()));
+                    break;
+                }
+                _ => index += 1,
+            }
+        }
+
+        let Some(gtp_move) = move_coord else {
+            continue;
+        };
+
+        let position = match parse_gtp_move(&gtp_move, board_size) {
+            Ok(ParsedGtpMove::Position(position)) => Some(position),
+            Ok(ParsedGtpMove::Pass | ParsedGtpMove::Resign) | Err(_) => None,
+        };
+        let normalized_winrate = if winrate <= 1.0 && winrate > 0.0 {
+            winrate * 100.0
+        } else if winrate > 100.0 {
+            winrate / 100.0
+        } else {
+            winrate
+        };
+
+        moves.push(AnalysisMove {
+            position,
+            gtp_move,
+            visits,
+            winrate: round2(normalized_winrate),
+            score_lead: round2(score_lead),
+            pv,
+        });
+    }
+
+    moves.sort_by(|a, b| b.visits.cmp(&a.visits));
+    moves
+}
+
+fn round2(value: f64) -> f64 {
+    (value * 100.0).round() / 100.0
+}

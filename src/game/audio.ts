@@ -6,12 +6,20 @@ let streamGains: GainNode[] = [];
 let streamFilters: BiquadFilterNode[] = [];
 let lfos: OscillatorNode[] = [];
 let lfoGains: GainNode[] = [];
-let bubbleTimerId: any = null;
+let bubbleTimerId: number | null = null;
 let isBgmPlaying = false;
+
+type WebkitAudioWindow = Window & typeof globalThis & {
+  webkitAudioContext?: typeof AudioContext;
+};
 
 function getAudioContext(): AudioContext {
   if (!audioCtx) {
-    audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const AudioContextConstructor = window.AudioContext || (window as WebkitAudioWindow).webkitAudioContext;
+    if (!AudioContextConstructor) {
+      throw new Error('Web Audio API is not supported');
+    }
+    audioCtx = new AudioContextConstructor();
   }
   if (audioCtx.state === 'suspended') {
     audioCtx.resume();
@@ -236,7 +244,7 @@ function playWaterBubble() {
 
     osc.start(now);
     osc.stop(now + 0.07);
-  } catch (e) {
+  } catch {
     // Ignore minor scheduling errors
   }
 }
@@ -335,7 +343,9 @@ export function stopBgm() {
     if (node) {
       try {
         node.stop();
-      } catch (e) {}
+      } catch {
+        // Node may already be stopped.
+      }
     }
   });
 
@@ -343,7 +353,9 @@ export function stopBgm() {
     if (node) {
       try {
         node.stop();
-      } catch (e) {}
+      } catch {
+        // LFO may already be stopped.
+      }
     }
   });
 
