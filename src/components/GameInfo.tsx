@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import Board from './Board';
 import type { GameState, MoveRecord, Position, ScoreResult, Stone, AnalysisResult, AnalysisMove, SavedGame } from '../game/types';
 import { calculateScore, createInitialState, getMaxHandicapStones, isValidMove, normalizeHandicap, pass, placeStone, resign, undo } from '../game/engine';
-import { getKataGoMove, getKataGoAnalysis } from '../game/katagoClient';
+import { getKataGoMove, getKataGoAnalysis, getKataGoSetupStatus, installKataGoRuntime, type KataGoSetupStatus } from '../game/katagoClient';
 import { playStoneSound, playCaptureSound, startBgm, stopBgm } from '../game/audio';
 
 type GameMode = 'pvp' | 'pve';
@@ -89,6 +89,8 @@ export default function GameApp() {
   const [humanColor, setHumanColor] = useState<Stone>('black');
   const [nigiri, setNigiri] = useState<NigiriState>({ status: 'idle' });
   const [aiThinking, setAiThinking] = useState(false);
+  const [katagoStatus, setKatagoStatus] = useState<KataGoSetupStatus | null>(null);
+  const [katagoSetupLoading, setKatagoSetupLoading] = useState(false);
   const [komi, setKomi] = useState(DEFAULT_KOMI);
   const [notice, setNotice] = useState('');
   const [showAnalysis, setShowAnalysis] = useState(false);
@@ -125,6 +127,40 @@ export default function GameApp() {
       stopBgm();
     };
   }, []);
+
+  const refreshKataGoStatus = useCallback(() => {
+    getKataGoSetupStatus()
+      .then(setKatagoStatus)
+      .catch(() => {
+        setKatagoStatus({
+          ok: false,
+          running: false,
+          installDir: '',
+          message: 'KataGo Bridge 未连接',
+        });
+      });
+  }, []);
+
+  useEffect(() => {
+    refreshKataGoStatus();
+  }, [refreshKataGoStatus]);
+
+  const handleInstallKataGo = useCallback(() => {
+    setKatagoSetupLoading(true);
+    setNotice('正在安装 KataGo AI 引擎，首次下载可能需要几分钟');
+    installKataGoRuntime()
+      .then(status => {
+        setKatagoStatus(status);
+        setAiEngine('katago');
+        setNotice('KataGo AI 引擎已安装完成');
+      })
+      .catch(error => {
+        const message = error instanceof Error ? error.message : String(error);
+        setNotice(`KataGo 安装失败：${message}`);
+        refreshKataGoStatus();
+      })
+      .finally(() => setKatagoSetupLoading(false));
+  }, [refreshKataGoStatus]);
 
   const { currentPlayer, gameOver, passCount, boardSize, moveRecords, handicap } = gameState;
 
@@ -963,7 +999,7 @@ export default function GameApp() {
                   type="button"
                   className={aiEngine === 'katago' ? 'active' : ''}
                   onClick={() => setAiEngine('katago')}
-                  disabled={aiThinking}
+                  disabled={aiThinking || katagoSetupLoading}
                 >
                   KataGo
                 </button>
@@ -971,9 +1007,26 @@ export default function GameApp() {
                   type="button"
                   className={aiEngine === 'browser' ? 'active' : ''}
                   onClick={() => setAiEngine('browser')}
-                  disabled={aiThinking}
+                  disabled={aiThinking || katagoSetupLoading}
                 >
                   本地
+                </button>
+              </div>
+              <div className={`katago-setup ${katagoStatus?.ok ? 'ready' : 'missing'}`}>
+                <div>
+                  <strong>{katagoStatus?.ok ? 'KataGo 已就绪' : '需要安装 KataGo'}</strong>
+                  <span>
+                    {katagoStatus?.ok
+                      ? katagoStatus.katagoModel ?? '模型已配置'
+                      : '一键下载 AI 引擎、模型和配置文件'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={katagoStatus?.ok ? refreshKataGoStatus : handleInstallKataGo}
+                  disabled={katagoSetupLoading || aiThinking}
+                >
+                  {katagoSetupLoading ? '安装中...' : katagoStatus?.ok ? '检测' : '安装 AI 引擎'}
                 </button>
               </div>
             </section>

@@ -4,14 +4,18 @@ use std::{
     env, fs,
     io::{BufRead, BufReader, Read, Write},
     net::{TcpListener, TcpStream},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Child, ChildStdout, Command, Stdio},
     sync::{Arc, Mutex},
     thread,
     time::Duration,
 };
+use tauri::AppHandle;
 
 const COLUMNS: &str = "ABCDEFGHJKLMNOPQRST";
+const KATAGO_MODEL_URL: &str = "https://media.katagotraining.org/uploaded/networks/models/kata1/kata1-b18c384nbt-s9996604416-d4316597426.bin.gz";
+const KATAGO_CONFIG_URL: &str =
+    "https://raw.githubusercontent.com/lightvector/KataGo/master/cpp/configs/gtp_example.cfg";
 
 #[derive(Clone)]
 struct BridgeConfig {
@@ -30,9 +34,18 @@ impl BridgeConfig {
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(3107);
 
-        let katago_bin = env::var_os("KATAGO_BIN")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/opt/homebrew/bin/katago"));
+        let installed_root = katago_install_root();
+        let installed_bin = installed_root.join("bin/katago");
+        let installed_model = installed_root.join("models/default.bin.gz");
+        let installed_config = installed_root.join("configs/gtp_example.cfg");
+
+        let katago_bin = env::var_os("KATAGO_BIN").map(PathBuf::from).unwrap_or_else(|| {
+            if installed_bin.exists() {
+                installed_bin
+            } else {
+                PathBuf::from("/opt/homebrew/bin/katago")
+            }
+        });
         let katago_share = env::var_os("KATAGO_SHARE")
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("/opt/homebrew/opt/katago/share/katago"));
@@ -42,12 +55,14 @@ impl BridgeConfig {
 
         let model_candidates = [
             env::var_os("KATAGO_MODEL").map(PathBuf::from),
+            Some(installed_model),
             Some(katago_share.join("kata1-b18c384nbt-s9996604416-d4316597426.bin.gz")),
             Some(katago_share.join("g170e-b20c256x2-s5303129600-d1228401921.bin.gz")),
             Some(katago_share.join("g170-b40c256x2-s5095420928-d1229425124.bin.gz")),
         ];
         let config_candidates = [
             env::var_os("KATAGO_CONFIG").map(PathBuf::from),
+            Some(installed_config),
             Some(katago_share.join("configs/gtp_example.cfg")),
         ];
 
@@ -67,6 +82,254 @@ impl BridgeConfig {
             log_dir,
         }
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KataGoSetupStatus {
+    ok: bool,
+    running: bool,
+    katago_bin: Option<String>,
+    katago_model: Option<String>,
+    katago_config: Option<String>,
+    install_dir: String,
+    message: String,
+}
+
+fn katago_install_root() -> PathBuf {
+    env::var_os("GO_GAME_KATAGO_DIR")
+        .map(PathBuf::from)
+        .or_else(|| {
+            env::var_os("HOME")
+                .map(PathBuf::from)
+                .map(|home| home.join("Library/Application Support/go-game/katago"))
+        })
+        .unwrap_or_else(|| env::temp_dir().join("go-game/katago"))
+}
+
+fn setup_status(running: bool) -> KataGoSetupStatus {
+    let config = BridgeConfig::new();
+    let ok = config.katago_bin.exists()
+        && config.katago_model.is_some()
+        && config.katago_config.is_some();
+
+    KataGoSetupStatus {
+        ok,
+        running,
+        katago_bin: config
+            .katago_bin
+            .exists()
+            .then(|| config.katago_bin.display().to_string()),
+        katago_model: config
+            .katago_model
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        katago_config: config
+            .katago_config
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        install_dir: katago_install_root().display().to_string(),
+        message: if ok {
+            "KataGo is ready".to_string()
+        } else {
+            "KataGo runtime is not installed".to_string()
+        },
+    }
+}
+
+#[tauri::command]
+pub fn katago_setup_status() -> KataGoSetupStatus {
+    setup_status(false)
+}
+
+#[tauri::command]
+pub fn install_katago_runtime(_app: AppHandle) -> Result<KataGoSetupStatus, String> {
+    let root = katago_install_root();
+    let bin_dir = root.join("bin");
+    let model_dir = root.join("models");
+    let config_dir = root.join("configs");
+    let downloads_dir = root.join("downloads");
+
+    fs::create_dir_all(&bin_dir).map_err(|error| format!("Failed to create bin dir: {error}"))?;
+    fs::create_dir_all(&model_dir)
+        .map_err(|error| format!("Failed to create model dir: {error}"))?;
+    fs::create_dir_all(&config_dir)
+        .map_err(|error| format!("Failed to create config dir: {error}"))?;
+    fs::create_dir_all(&downloads_dir)
+        .map_err(|error| format!("Failed to create download dir: {error}"))?;
+
+    match find_katago_release_asset_url(&downloads_dir)? {
+        Some(release_asset_url) => {
+            install_katago_from_release(&release_asset_url, &downloads_dir, &bin_dir)?;
+        }
+        None => {
+            install_katago_with_homebrew()?;
+        }
+    }
+
+    let model_path = model_dir.join("default.bin.gz");
+    if !model_path.exists() {
+        run_command(
+            "curl",
+            &[
+                "-L",
+                "--fail",
+                "--show-error",
+                "--output",
+                path_str(&model_path)?,
+                KATAGO_MODEL_URL,
+            ],
+        )?;
+    }
+
+    let config_path = config_dir.join("gtp_example.cfg");
+    if !config_path.exists() {
+        run_command(
+            "curl",
+            &[
+                "-L",
+                "--fail",
+                "--show-error",
+                "--output",
+                path_str(&config_path)?,
+                KATAGO_CONFIG_URL,
+            ],
+        )?;
+    }
+
+    let status = setup_status(false);
+    if status.ok {
+        Ok(status)
+    } else {
+        Err("KataGo files were downloaded, but setup validation did not pass".to_string())
+    }
+}
+
+fn install_katago_from_release(
+    release_asset_url: &str,
+    downloads_dir: &Path,
+    bin_dir: &Path,
+) -> Result<(), String> {
+    let archive_path = downloads_dir.join("katago.zip");
+    run_command(
+        "curl",
+        &[
+            "-L",
+            "--fail",
+            "--show-error",
+            "--output",
+            path_str(&archive_path)?,
+            release_asset_url,
+        ],
+    )?;
+
+    let extract_dir = downloads_dir.join("katago-release");
+    if extract_dir.exists() {
+        fs::remove_dir_all(&extract_dir)
+            .map_err(|error| format!("Failed to clear previous KataGo download: {error}"))?;
+    }
+    fs::create_dir_all(&extract_dir)
+        .map_err(|error| format!("Failed to create extract dir: {error}"))?;
+    run_command(
+        "unzip",
+        &[
+            "-q",
+            "-o",
+            path_str(&archive_path)?,
+            "-d",
+            path_str(&extract_dir)?,
+        ],
+    )?;
+
+    let extracted_bin = find_file_named(&extract_dir, "katago")
+        .ok_or_else(|| "Downloaded KataGo archive did not contain a katago binary".to_string())?;
+    let target_bin = bin_dir.join("katago");
+    fs::copy(&extracted_bin, &target_bin)
+        .map_err(|error| format!("Failed to install KataGo binary: {error}"))?;
+    run_command("chmod", &["+x", path_str(&target_bin)?])
+}
+
+fn install_katago_with_homebrew() -> Result<(), String> {
+    if Command::new("brew").arg("--version").output().is_err() {
+        return Err(
+            "KataGo does not publish macOS binaries in the latest release, and Homebrew is not installed".to_string(),
+        );
+    }
+
+    run_command("brew", &["list", "katago"]).or_else(|_| run_command("brew", &["install", "katago"]))
+}
+
+fn find_katago_release_asset_url(downloads_dir: &Path) -> Result<Option<String>, String> {
+    let metadata_path = downloads_dir.join("katago-release.json");
+    run_command(
+        "curl",
+        &[
+            "-L",
+            "--fail",
+            "--show-error",
+            "--output",
+            path_str(&metadata_path)?,
+            "https://api.github.com/repos/lightvector/KataGo/releases/latest",
+        ],
+    )?;
+
+    let metadata = fs::read_to_string(&metadata_path)
+        .map_err(|error| format!("Failed to read KataGo release metadata: {error}"))?;
+    let value: Value = serde_json::from_str(&metadata)
+        .map_err(|error| format!("Failed to parse KataGo release metadata: {error}"))?;
+    let arch = env::consts::ARCH;
+    let wanted_arch = if arch == "aarch64" { "arm64" } else { "x64" };
+
+    let release_asset_url = value
+        .get("assets")
+        .and_then(Value::as_array)
+        .and_then(|assets| {
+            assets.iter().find_map(|asset| {
+                let name = asset.get("name")?.as_str()?.to_ascii_lowercase();
+                let url = asset.get("browser_download_url")?.as_str()?;
+                let is_macos = name.contains("mac") || name.contains("osx");
+                let is_archive = name.ends_with(".zip");
+                let is_arch = name.contains(wanted_arch)
+                    || (wanted_arch == "x64" && name.contains("x86_64"));
+                (is_macos && is_archive && is_arch).then(|| url.to_string())
+            })
+        });
+
+    Ok(release_asset_url)
+}
+
+fn find_file_named(root: &Path, file_name: &str) -> Option<PathBuf> {
+    for entry in fs::read_dir(root).ok()? {
+        let entry = entry.ok()?;
+        let path = entry.path();
+        if path.file_name().is_some_and(|name| name == file_name) {
+            return Some(path);
+        }
+        if path.is_dir() {
+            if let Some(found) = find_file_named(&path, file_name) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+fn run_command(program: &str, args: &[&str]) -> Result<(), String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|error| format!("Failed to run {program}: {error}"))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(format!("{program} failed: {stderr}"))
+    }
+}
+
+fn path_str(path: &Path) -> Result<&str, String> {
+    path.to_str()
+        .ok_or_else(|| format!("Path is not valid UTF-8: {}", path.display()))
 }
 
 fn first_existing(candidates: &[Option<PathBuf>]) -> Option<PathBuf> {
@@ -134,16 +397,20 @@ fn handle_connection(
         ("GET", "/health") => {
             let running = bridge
                 .lock()
-                .map(|mut bridge| bridge.is_running())
+                .map(|mut bridge| {
+                    bridge.refresh_config();
+                    bridge.is_running()
+                })
                 .unwrap_or(false);
+            let current_config = BridgeConfig::new();
             Ok(json!({
-                "ok": config.katago_bin.exists()
-                    && config.katago_model.is_some()
-                    && config.katago_config.is_some(),
+                "ok": current_config.katago_bin.exists()
+                    && current_config.katago_model.is_some()
+                    && current_config.katago_config.is_some(),
                 "running": running,
-                "katagoBin": config.katago_bin,
-                "katagoModel": config.katago_model,
-                "katagoConfig": config.katago_config,
+                "katagoBin": current_config.katago_bin,
+                "katagoModel": current_config.katago_model,
+                "katagoConfig": current_config.katago_config,
                 "port": config.port,
             }))
         }
@@ -300,6 +567,12 @@ impl KataGoBridge {
         }
     }
 
+    fn refresh_config(&mut self) {
+        if !self.is_running() {
+            self.config = BridgeConfig::new();
+        }
+    }
+
     fn ensure_started(&mut self) -> Result<(), String> {
         if let Some(process) = self.process.as_mut() {
             match process.child.try_wait() {
@@ -311,6 +584,7 @@ impl KataGoBridge {
                 Err(error) => return Err(format!("Failed to check KataGo process: {error}")),
             }
         }
+        self.refresh_config();
 
         if !self.config.katago_bin.exists() {
             return Err(format!(
