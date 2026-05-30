@@ -1,6 +1,25 @@
 import type { GameState, Position, AnalysisResult } from './types';
 
 export type KataGoMoveResult = Position | 'resign' | null;
+export type KataGoSetupStatus = {
+  ok: boolean;
+  running: boolean;
+  katagoBin?: string;
+  katagoModel?: string;
+  katagoConfig?: string;
+  installDir: string;
+  message: string;
+};
+
+type TauriInternals = {
+  invoke?: <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+};
+
+declare global {
+  interface Window {
+    __TAURI_INTERNALS__?: TauriInternals;
+  }
+}
 
 const DEFAULT_BRIDGE_URL = 'http://127.0.0.1:3107';
 
@@ -15,6 +34,30 @@ function isPosition(value: unknown): value is Position {
     Number.isInteger((value as Position).row) &&
     Number.isInteger((value as Position).col)
   );
+}
+
+function tauriInvoke<T>(command: string, args?: Record<string, unknown>) {
+  const invoke = window.__TAURI_INTERNALS__?.invoke;
+  if (!invoke) {
+    throw new Error('Tauri runtime is unavailable');
+  }
+  return invoke<T>(command, args);
+}
+
+export async function getKataGoSetupStatus(): Promise<KataGoSetupStatus> {
+  if (window.__TAURI_INTERNALS__?.invoke) {
+    return tauriInvoke<KataGoSetupStatus>('katago_setup_status');
+  }
+
+  const response = await fetch(`${bridgeUrl()}/health`);
+  if (!response.ok) {
+    throw new Error(`KataGo bridge returned ${response.status}`);
+  }
+  return response.json() as Promise<KataGoSetupStatus>;
+}
+
+export async function installKataGoRuntime(): Promise<KataGoSetupStatus> {
+  return tauriInvoke<KataGoSetupStatus>('install_katago_runtime');
 }
 
 export async function getKataGoMove(state: GameState, komi: number): Promise<KataGoMoveResult> {

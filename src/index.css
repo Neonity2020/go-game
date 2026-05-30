@@ -461,6 +461,58 @@ button:disabled {
   box-shadow: 0 10px 22px rgba(47, 118, 110, 0.18);
 }
 
+.katago-setup {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  margin-top: 10px;
+  padding: 10px;
+  border: 1px solid rgba(55, 50, 43, 0.12);
+  border-radius: 8px;
+  background: #f4f1eb;
+}
+
+.katago-setup.ready {
+  background: rgba(47, 118, 110, 0.08);
+}
+
+.katago-setup.missing {
+  background: rgba(154, 65, 60, 0.08);
+}
+
+.katago-setup div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.katago-setup strong {
+  color: #24221f;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.katago-setup span {
+  overflow: hidden;
+  color: #706a60;
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.katago-setup button {
+  min-height: 34px;
+  padding: 7px 10px;
+  border-radius: 7px;
+  background: #242528;
+  color: #fff;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 760;
+}
+
 .move-list-section {
   display: grid;
   min-height: 170px;
@@ -581,6 +633,10 @@ button:disabled {
   }
 
   .nigiri-result {
+    grid-template-columns: 1fr;
+  }
+
+  .katago-setup {
     grid-template-columns: 1fr;
   }
 }
